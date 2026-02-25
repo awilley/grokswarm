@@ -257,9 +257,12 @@ async def run_expert(name: str, task_desc: str, bus: SwarmBus | None = None, age
 
     # Inject project context so the agent knows the codebase
     project_context = ""
-    if shared.PROJECT_CONTEXT:
+    if shared.PROJECT_CONTEXT and shared.PROJECT_CONTEXT.get("project_name"):
         from grokswarm.context import format_context_for_prompt
-        project_context = "\n" + format_context_for_prompt(shared.PROJECT_CONTEXT)
+        try:
+            project_context = "\n" + format_context_for_prompt(shared.PROJECT_CONTEXT)
+        except (KeyError, TypeError):
+            pass
 
     system_prompt = f"""You are {data['name']}, an expert with permanent mindset:
 {data['mindset']}
