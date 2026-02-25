@@ -644,7 +644,7 @@ async def _chat_async(session_name: str | None = None):
     async def _spinner_tick():
         while True:
             await asyncio.sleep(0.12)
-            if shared._toolbar_status and not shared._toolbar_suspended:
+            if shared._toolbar_status and not shared._toolbar_suspended and not shared._is_prompt_suspended:
                 shared._toolbar_spinner_idx += 1
                 if shared._toolbar_app_ref:
                     try:
@@ -675,7 +675,7 @@ async def _chat_async(session_name: str | None = None):
         else:
             mode_str = "<ansidarkgray>NORMAL</ansidarkgray> <ansidarkgray>(require approval)</ansidarkgray>"
         parts = []
-        if shared._toolbar_status:
+        if shared._toolbar_status and not shared._is_prompt_suspended:
             icon = shared.THINKING_FRAMES[shared._toolbar_spinner_idx % len(shared.THINKING_FRAMES)]
             parts.append(f"  <ansicyan>{icon}</ansicyan> <ansiwhite>{shared._toolbar_status}</ansiwhite>")
         parts.append(

@@ -150,6 +150,10 @@ async def _suspend_prompt_and_run(func):
         return await asyncio.to_thread(func)
 
     async with shared._suspend_lock:
+        # Clear toolbar status BEFORE suspending so the final prompt_toolkit
+        # render cycle doesn't include spinner chars that leak into Rich output.
+        _saved_status = shared._toolbar_status
+        shared._toolbar_status = ""
         shared._toolbar_suspended = True
         shared._is_prompt_suspended = True
 
@@ -162,11 +166,17 @@ async def _suspend_prompt_and_run(func):
         await shared._prompt_suspend_event.wait()
         shared._prompt_suspend_event.clear()
 
+        # Flush a clean line so Rich Confirm.ask() starts on a fresh row
+        import sys
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+
         try:
             return await asyncio.to_thread(func)
         finally:
             shared._is_prompt_suspended = False
             shared._toolbar_suspended = False
+            shared._toolbar_status = _saved_status
             shared._prompt_resume_event.set()
 
 
@@ -277,6 +287,9 @@ async def _execute_tool(name: str, args: dict, timed: bool = False):
             if is_threadable:
                 result = await asyncio.to_thread(handler, args)
             else:
+                # Clear status before suspending prompt for approval --
+                # prevents spinner chars leaking into Rich Confirm prompts.
+                shared._clear_status()
                 result = await _suspend_prompt_and_run(lambda: handler(args))
                 if asyncio.iscoroutine(result):
                     result = await result

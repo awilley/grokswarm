@@ -50,7 +50,7 @@ def _set_status(text: str):
     global _toolbar_status, _toolbar_spinner_idx
     _toolbar_status = text
     _toolbar_spinner_idx = 0
-    if _toolbar_app_ref and not _toolbar_suspended:
+    if _toolbar_app_ref and not _toolbar_suspended and not _is_prompt_suspended:
         try:
             _toolbar_app_ref.invalidate()
         except Exception:
@@ -60,7 +60,7 @@ def _set_status(text: str):
 def _clear_status():
     global _toolbar_status
     _toolbar_status = ""
-    if _toolbar_app_ref and not _toolbar_suspended:
+    if _toolbar_app_ref and not _toolbar_suspended and not _is_prompt_suspended:
         try:
             _toolbar_app_ref.invalidate()
         except Exception:
