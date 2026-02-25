@@ -382,6 +382,16 @@ def _tool_detail(name: str, args: dict) -> str:
     elif name.startswith("skill_"):
         ctx = args.get("context", "")
         return f" \u2192 {ctx[:60]}" if ctx else ""
+    elif name.startswith("mcp_"):
+        # Show first meaningful argument value for MCP tools
+        for key in ("query", "slug", "keyword", "name"):
+            val = args.get(key)
+            if val:
+                return f" \u2192 {key}='{str(val)[:60]}'"
+        if args:
+            first_key = next(iter(args))
+            return f" \u2192 {first_key}='{str(args[first_key])[:50]}'"
+        return ""
     return ""
 
 

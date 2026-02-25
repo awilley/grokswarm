@@ -71,6 +71,7 @@ class SwarmCompleter(Completer):
         "/swarm": "Run multi-agent supervisor",
         "/watch": "Live monitor for running background agents",
         "/abort": "Abort currently running swarm",
+        "/tell": "Send guidance to a running agent: /tell <agent> <message>",
         "/clear-swarm": "Clear stale swarm data (agents, bus messages)",
         "/experts": "List available experts",
         "/skills": "List available skills",
@@ -281,6 +282,7 @@ def _show_help():
         ("/self-improve <desc>", "Improve own source code (shadow + auto-test)"),
         ("/swarm <task>", "Run multi-agent supervisor"),
         ("/abort", "Abort currently running swarm"),
+        ("/tell <agent> <msg>", "Send guidance to a running agent mid-task"),
         ("/experts", "List available experts"),
         ("/skills", "List available skills"),
         ("/context", "Show project context (refresh to rescan)"),
@@ -759,7 +761,7 @@ async def _chat_async(session_name: str | None = None):
                     cmd = parts[0][1:].lower()
                     arg = parts[1] if len(parts) > 1 else ""
 
-                    if processing_busy and cmd not in {"abort", "agents", "watch", "verbose", "help", "quit", "exit", "q",
+                    if processing_busy and cmd not in {"abort", "tell", "agents", "watch", "verbose", "help", "quit", "exit", "q",
                                                        "doctor", "dashboard", "metrics", "context", "experts", "skills",
                                                        "trust", "readonly", "git", "list", "read", "search", "grep",
                                                        "session", "project", "undo"}:
@@ -979,6 +981,17 @@ async def _chat_async(session_name: str | None = None):
                         shared.console.print()
                     elif cmd == "watch":
                         await _watch_agents(auto_exit=False)
+                    elif cmd == "tell":
+                        if not arg:
+                            shared.console.print("[swarm.dim]Usage: /tell <agent_name> <message>[/swarm.dim]")
+                        else:
+                            tell_parts = arg.split(maxsplit=1)
+                            if len(tell_parts) < 2:
+                                shared.console.print("[swarm.dim]Usage: /tell <agent_name> <message>[/swarm.dim]")
+                            else:
+                                tell_target, tell_msg = tell_parts
+                                get_bus().post("user", tell_msg, recipient=tell_target, kind="nudge")
+                                shared.console.print(f"[swarm.accent]Sent nudge to '{tell_target}':[/swarm.accent] {tell_msg}")
                     elif cmd == "abort":
                         from grokswarm.commands import abort as abort_cmd
                         abort_cmd()

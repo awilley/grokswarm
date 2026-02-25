@@ -11,9 +11,9 @@ import subprocess
 
 import grokswarm.shared as shared
 from grokswarm.models import AgentState
-from grokswarm.tools_registry import TOOL_DISPATCH, get_agent_tool_schemas
+from grokswarm.tools_registry import TOOL_DISPATCH, READ_ONLY_TOOLS, get_agent_tool_schemas
 from grokswarm.registry_helpers import list_experts, save_memory
-from grokswarm.engine import _execute_tool, _repair_json, _trim_conversation, MAX_TOOL_RESULT_SIZE
+from grokswarm.engine import _execute_tool, _repair_json, _trim_conversation, _tool_detail, MAX_TOOL_RESULT_SIZE
 
 
 class SwarmBus:
@@ -216,6 +216,96 @@ def _auto_checkpoint_before_agent(display_name: str):
         pass  # best-effort, don't block agent startup
 
 
+def _detect_tech_stack() -> str:
+    """Detect project tech stack from PROJECT_CONTEXT and key files. Returns a short summary string."""
+    ctx = shared.PROJECT_CONTEXT
+    if not ctx:
+        return ""
+    parts = []
+    # Language stats
+    lang_stats = ctx.get("language_stats", {})
+    if lang_stats:
+        top_langs = [ext.lstrip(".") for ext in list(lang_stats.keys())[:5]]
+        parts.append(f"Languages: {', '.join(top_langs)}")
+    # Detect from key files content
+    key_files = ctx.get("key_files", {})
+    frameworks = []
+    py_version = ""
+    for fname, content in key_files.items():
+        c = content.lower() if content else ""
+        if fname == "pyproject.toml" or fname == "setup.cfg":
+            if "python_requires" in c:
+                import re
+                m = re.search(r'python_requires\s*=\s*["\']([^"\']+)', content)
+                if m:
+                    py_version = m.group(1)
+            for fw in ["pytest", "textual", "rich", "fastapi", "flask", "django", "httpx",
+                        "requests", "click", "typer", "pydantic", "sqlalchemy", "asyncio"]:
+                if fw in c:
+                    frameworks.append(fw)
+        elif fname == "requirements.txt":
+            for fw in ["pytest", "textual", "rich", "fastapi", "flask", "django", "httpx",
+                        "requests", "click", "typer", "pydantic", "sqlalchemy"]:
+                if fw in c:
+                    frameworks.append(fw)
+        elif fname == "package.json":
+            for fw in ["react", "vue", "next", "express", "jest", "typescript", "tailwind"]:
+                if fw in c:
+                    frameworks.append(fw)
+        elif fname == "Cargo.toml":
+            for fw in ["tokio", "actix", "serde", "clap"]:
+                if fw in c:
+                    frameworks.append(fw)
+    if py_version:
+        parts.append(f"Python: {py_version}")
+    if frameworks:
+        parts.append(f"Frameworks/libs: {', '.join(sorted(set(frameworks)))}")
+    # Detect test framework
+    tree = ctx.get("tree", "")
+    if "test_" in tree or "conftest" in tree:
+        if "pytest" not in frameworks:
+            parts.append("Testing: pytest (detected)")
+    return "; ".join(parts) if parts else ""
+
+
+def _build_completion_report(display_name: str, tool_actions: list[str], rounds_used: int,
+                              max_rounds: int, full_output: str) -> str:
+    """Build a structured completion report for bus posting."""
+    files_written = set()
+    files_edited = set()
+    tests_run = False
+    test_result = ""
+    for action in tool_actions:
+        if action.startswith("write_file"):
+            path = action.split(" \u2192 ", 1)[1] if " \u2192 " in action else ""
+            if path:
+                files_written.add(path.strip())
+        elif action.startswith("edit_file"):
+            path = action.split(" \u2192 ", 1)[1] if " \u2192 " in action else ""
+            if path:
+                files_edited.add(path.strip())
+        elif action.startswith("run_tests"):
+            tests_run = True
+
+    lines = [f"=== Agent '{display_name}' Completion Report ==="]
+    lines.append(f"Rounds: {rounds_used}/{max_rounds}")
+    if files_written:
+        lines.append(f"Files created: {', '.join(sorted(files_written))}")
+    if files_edited:
+        lines.append(f"Files modified: {', '.join(sorted(files_edited))}")
+    if not files_written and not files_edited:
+        lines.append("Files changed: none")
+    lines.append(f"Tests run: {'yes' if tests_run else 'no'}")
+    lines.append(f"Tools used: {len(tool_actions)}")
+    # Include truncated output summary
+    if full_output:
+        summary = full_output.strip()
+        if len(summary) > 1500:
+            summary = summary[:1500] + "\n... (truncated)"
+        lines.append(f"\nAgent output:\n{summary}")
+    return "\n".join(lines)
+
+
 async def run_expert(name: str, task_desc: str, bus: SwarmBus | None = None, agent_name: str | None = None):
     expert_file = shared.EXPERTS_DIR / f"{name.lower()}.yaml"
     if not expert_file.exists():
@@ -264,11 +354,15 @@ async def run_expert(name: str, task_desc: str, bus: SwarmBus | None = None, age
         except (KeyError, TypeError):
             pass
 
+    # Detect tech stack for contextual guidance
+    tech_stack = _detect_tech_stack()
+    tech_stack_line = f"\nProject tech stack: {tech_stack}" if tech_stack else ""
+
     system_prompt = f"""You are {data['name']}, an expert with permanent mindset:
 {data['mindset']}
 
 Core objectives: {data.get('objectives', ['Execute efficiently'])}
-
+{tech_stack_line}
 Rules:
 - Stay strictly in character.
 - Respond concisely and directly. No emojis. No hype. No filler.
@@ -279,7 +373,9 @@ Rules:
 - Do not just describe what to do — actually do it immediately.
 - After writing code, run it (run_shell or run_tests) to verify it works. Do not claim it works without running it.
 - Use capture_tui_screenshot or run_app_capture to verify visual/UI output when relevant.
+- Use web_search when you genuinely need current or unknown information. For standard programming knowledge, use your built-in knowledge.
 - Work fast: create files, write code, test, done. Minimize rounds.
+- BEFORE you finish, you MUST run run_tests (or run_shell with appropriate test command) if you modified any code files. Never claim success without verified test results.
 
 PLANNING (MANDATORY):
 - Your VERY FIRST action must be calling update_plan to outline your work steps.
@@ -293,15 +389,31 @@ PLANNING (MANDATORY):
     ]
     full_output = ""
     tool_actions: list[str] = []
+    made_file_mutations = False
+    ran_tests = False
 
     # Build tool schemas dynamically so MCP tools are included
     agent_tools = get_agent_tool_schemas()
 
     shared.state.agent_mode += 1
     try:
+        rounds_used = 0
         for _round in range(max_rounds):
+            rounds_used = _round + 1
+
             # Compact conversation if it's getting large (same as main chat loop)
             conversation = await _trim_conversation(conversation)
+
+            # Mid-run user interaction: check bus for nudge messages
+            if bus:
+                nudges = bus.read(display_name, since_id=0)
+                for nudge in nudges:
+                    if nudge["kind"] == "nudge" and nudge["sender"] != display_name:
+                        conversation.append({
+                            "role": "user",
+                            "content": f"[USER GUIDANCE] {nudge['body']}",
+                        })
+                        shared._log(f"agent {display_name}: received nudge from {nudge['sender']}")
 
             agent.transition(AgentState.THINKING)
 
@@ -346,6 +458,18 @@ PLANNING (MANDATORY):
                 content = msg.content or ""
                 full_output += content
                 conversation.append({"role": "assistant", "content": content})
+
+                # Verification gate: if agent made file mutations but never ran tests,
+                # inject a prompt and give it one more round
+                if made_file_mutations and not ran_tests and _round < max_rounds - 1:
+                    conversation.append({
+                        "role": "user",
+                        "content": "[SYSTEM] You modified code files but have not run tests yet. "
+                                   "Run run_tests now to verify your changes work before finishing.",
+                    })
+                    shared._log(f"agent {display_name}: verification gate triggered (files changed, no tests run)")
+                    continue  # give it another round
+
                 break
 
             agent.transition(AgentState.WORKING)
@@ -363,6 +487,8 @@ PLANNING (MANDATORY):
 
             shared._log(f"agent {display_name}: round {_round + 1}/{max_rounds} - {len(msg.tool_calls)} tools")
 
+            # Parse all tool calls first
+            parsed_tools: list[tuple] = []  # (tc_dict, tool_name, args)
             for tc in msg.tool_calls:
                 tool_name = tc.function.name
                 try:
@@ -373,39 +499,69 @@ PLANNING (MANDATORY):
                     except json.JSONDecodeError:
                         conversation.append({
                             "role": "tool", "tool_call_id": tc.id,
-                            "content": f"Error: invalid JSON arguments",
+                            "content": "Error: invalid JSON arguments",
                         })
                         continue
-
-                agent.current_tool = tool_name
-                detail = ""
-                if tool_name in ("write_file", "read_file", "edit_file"):
-                    detail = f" \u2192 {args.get('path', '?')}"
-                elif tool_name == "run_shell":
-                    detail = f" \u2192 {args.get('command', '?')[:60]}"
-                shared._log(f"agent {display_name}: {tool_name}{detail}")
-                tool_actions.append(f"{tool_name}{detail}")
 
                 if tool_name == "update_plan":
                     args["_agent_name"] = display_name
                 elif tool_name == "spawn_agent":
                     args["_parent"] = display_name
 
-                result_str = await _execute_tool(tool_name, args)
-                if len(result_str) > MAX_TOOL_RESULT_SIZE:
-                    result_str = result_str[:MAX_TOOL_RESULT_SIZE] + "\n... (truncated)"
-                conversation.append({
-                    "role": "tool", "tool_call_id": tc.id,
-                    "content": result_str,
-                })
+                tc_dict = {"id": tc.id, "name": tool_name}
+                parsed_tools.append((tc_dict, tool_name, args))
+
+                detail = _tool_detail(tool_name, args)
+                shared._log(f"agent {display_name}: {tool_name}{detail}")
+                tool_actions.append(f"{tool_name}{detail}")
+
+                # Track file mutations and test runs
+                if tool_name in ("write_file", "edit_file"):
+                    made_file_mutations = True
+                elif tool_name == "run_tests":
+                    ran_tests = True
+
+            # Execute tools — parallel for read-only, sequential otherwise
+            all_read_only = all(n in READ_ONLY_TOOLS for _, n, _ in parsed_tools)
+            can_parallelize = all_read_only and len(parsed_tools) > 1
+
+            if can_parallelize:
+                shared._log(f"agent {display_name}: parallel executing {len(parsed_tools)} read-only tools")
+
+                async def _run_one(tc_d, t_name, t_args):
+                    agent.current_tool = t_name
+                    try:
+                        result_str = await _execute_tool(t_name, t_args)
+                    except Exception as e:
+                        result_str = f"Error: {e}"
+                    if len(result_str) > MAX_TOOL_RESULT_SIZE:
+                        result_str = result_str[:MAX_TOOL_RESULT_SIZE] + "\n... (truncated)"
+                    return tc_d, result_str
+
+                results = await asyncio.gather(*[_run_one(tc_d, tn, ta) for tc_d, tn, ta in parsed_tools])
+                for tc_d, result_str in results:
+                    conversation.append({
+                        "role": "tool", "tool_call_id": tc_d["id"],
+                        "content": result_str,
+                    })
+            else:
+                for tc_d, tool_name, args in parsed_tools:
+                    agent.current_tool = tool_name
+                    result_str = await _execute_tool(tool_name, args)
+                    if len(result_str) > MAX_TOOL_RESULT_SIZE:
+                        result_str = result_str[:MAX_TOOL_RESULT_SIZE] + "\n... (truncated)"
+                    conversation.append({
+                        "role": "tool", "tool_call_id": tc_d["id"],
+                        "content": result_str,
+                    })
 
             agent.current_tool = None
 
-        save_memory(f"expert_{display_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}", full_output)
+        # Structured completion report
+        report = _build_completion_report(display_name, tool_actions, rounds_used, max_rounds, full_output)
+        save_memory(f"expert_{display_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}", report)
         if bus:
-            bus.post(display_name, full_output[:2000] if full_output else "(no text output)")
-            if tool_actions:
-                bus.post(display_name, f"Tools executed: {', '.join(tool_actions[:20])}", kind="status")
+            bus.post(display_name, report, kind="result")
         agent.transition(AgentState.DONE)
         return full_output
     except Exception as e:

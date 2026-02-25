@@ -112,6 +112,7 @@ from grokswarm.agents import (
     SwarmBus, get_bus,
     _costs_file, _load_project_costs, _save_project_costs, _record_usage,
     EXPERT_DEFAULT_MAX_ROUNDS, _auto_checkpoint_before_agent,
+    _detect_tech_stack, _build_completion_report,
     run_supervisor, run_expert,
     _spawn_agent_impl, _send_message_impl, _check_messages_impl, _list_agents_impl,
 )
