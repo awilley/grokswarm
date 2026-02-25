@@ -725,7 +725,7 @@ async def _chat_async(session_name: str | None = None):
                     _cols = shutil.get_terminal_size((80, 20)).columns
                     line_str = "\u2500" * _cols
                     parts = []
-                    if shared._toolbar_status:
+                    if shared._toolbar_status and not shared._is_prompt_suspended:
                         icon = shared.THINKING_FRAMES[shared._toolbar_spinner_idx % len(shared.THINKING_FRAMES)]
                         parts.append(f"  <ansicyan>{icon}</ansicyan> <ansidarkgray>{shared._toolbar_status}</ansidarkgray>")
                     parts.append(f"<style fg='#444444'>{line_str}</style>")
