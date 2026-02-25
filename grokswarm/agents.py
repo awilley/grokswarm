@@ -391,6 +391,7 @@ PLANNING (MANDATORY):
     tool_actions: list[str] = []
     made_file_mutations = False
     ran_tests = False
+    verification_prompted = False
 
     # Build tool schemas dynamically so MCP tools are included
     agent_tools = get_agent_tool_schemas()
@@ -460,8 +461,9 @@ PLANNING (MANDATORY):
                 conversation.append({"role": "assistant", "content": content})
 
                 # Verification gate: if agent made file mutations but never ran tests,
-                # inject a prompt and give it one more round
-                if made_file_mutations and not ran_tests and _round < max_rounds - 1:
+                # inject a prompt and give it one more round (once only)
+                if made_file_mutations and not ran_tests and not verification_prompted and _round < max_rounds - 1:
+                    verification_prompted = True
                     conversation.append({
                         "role": "user",
                         "content": "[SYSTEM] You modified code files but have not run tests yet. "
