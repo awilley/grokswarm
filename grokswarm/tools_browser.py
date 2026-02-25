@@ -3,8 +3,6 @@
 import atexit
 import subprocess
 
-from rich.prompt import Confirm
-
 import grokswarm.shared as shared
 from grokswarm.context import _safe_path
 
@@ -19,7 +17,7 @@ def _get_browser():
             from playwright.sync_api import sync_playwright
         except ImportError:
             shared.console.print("[swarm.warning]Playwright is not installed (needed for browser tools).[/swarm.warning]")
-            if Confirm.ask("Install playwright + chromium now?", default=True):
+            if shared._auto_approve("Install playwright + chromium now?", default=True):
                 try:
                     subprocess.run(["pip", "install", "playwright"], check=True, timeout=120)
                     subprocess.run(["playwright", "install", "chromium"], check=True, timeout=180)

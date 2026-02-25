@@ -1,7 +1,6 @@
 """Git tools + checkpoint constants."""
 
 import subprocess
-from rich.prompt import Confirm
 
 import grokswarm.shared as shared
 from grokswarm.context import _safe_path
@@ -74,7 +73,7 @@ def git_checkout(target: str) -> str:
     safe = _safe_path(target)
     if safe and safe.exists():
         shared.console.print("[dim]This will discard uncommitted changes to this file.[/dim]")
-        if Confirm.ask("Approve file restore?", default=False):
+        if shared._auto_approve("Approve file restore?", default=False):
             return _run_git("checkout", "--", target)
         return "Checkout cancelled by user."
     else:
@@ -89,7 +88,7 @@ def git_branch(name: str | None = None, delete: bool = False) -> str:
         return _run_git("branch", "-a", "--no-color")
     if delete:
         shared.console.print(f"[bold yellow]About to DELETE branch:[/bold yellow] {name}")
-        if Confirm.ask("Approve branch deletion?", default=False):
+        if shared._auto_approve("Approve branch deletion?", default=False):
             return _run_git("branch", "-d", name)
         return "Branch deletion cancelled by user."
     return _run_git("branch", name)
@@ -131,7 +130,7 @@ def git_stash(action: str = "list", message: str | None = None) -> str:
         return "Stash pop cancelled by user."
     elif action == "drop":
         shared.console.print("[bold yellow]About to DROP top stash[/bold yellow] (permanently removes it)")
-        if Confirm.ask("Approve stash drop?", default=False):
+        if shared._auto_approve("Approve stash drop?", default=False):
             return _run_git("stash", "drop")
         return "Stash drop cancelled by user."
     else:

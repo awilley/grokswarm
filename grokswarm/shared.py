@@ -206,10 +206,39 @@ class SafeFileHistory(FileHistory):
         super().store_string(string.encode('utf-8', errors='replace').decode('utf-8'))
 
 
+def _terminal_confirm(prompt_text: str, default: bool = True) -> bool:
+    """Ask y/n via raw terminal I/O, bypassing Rich and prompt_toolkit.
+
+    This avoids the contention between patch_stdout and Rich.Confirm
+    that causes spinner characters to leak into approval prompts.
+    """
+    import sys
+    hint = "Y/n" if default else "y/N"
+    # Strip Rich markup for terminal display
+    import re as _re
+    clean = _re.sub(r'\[/?[^\]]*\]', '', prompt_text)
+    out = sys.__stdout__  # bypass prompt_toolkit's patch_stdout
+    out.write(f"{clean} [{hint}]: ")
+    out.flush()
+    try:
+        line = sys.__stdin__.readline().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        out.write("\n")
+        out.flush()
+        return default
+    if not line:
+        return default
+    return line in ("y", "yes")
+
+
 def _auto_approve(prompt: str, default: bool = True) -> bool:
     """Auto-approve in trust mode or agent mode, otherwise prompt the user."""
     if state.trust_mode or state.agent_mode > 0:
         return True
+    # When the REPL is active, Rich Confirm.ask() fights with
+    # prompt_toolkit's patch_stdout -- use raw terminal I/O instead.
+    if _toolbar_app_ref and _is_prompt_suspended:
+        return _terminal_confirm(prompt, default)
     return Confirm.ask(prompt, default=default)
 
 

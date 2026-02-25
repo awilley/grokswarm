@@ -14,7 +14,6 @@ import yaml
 from typer import Context
 from rich.panel import Panel
 from rich.table import Table
-from rich.prompt import Confirm
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion, PathCompleter
 from prompt_toolkit.document import Document
@@ -892,7 +891,7 @@ async def _chat_async(session_name: str | None = None):
                             if undo_content is None:
                                 shared.console.print(f"[bold yellow]Undo file creation:[/bold yellow] {undo_path}")
                                 shared.console.print(f"[dim]Edit history depth: {len(shared.state.edit_history)}[/dim]")
-                                if Confirm.ask("Delete this newly created file?", default=False):
+                                if shared._terminal_confirm("Delete this newly created file?", default=False):
                                     fp = _safe_path(undo_path)
                                     if fp and fp.is_file():
                                         fp.unlink()
@@ -908,7 +907,7 @@ async def _chat_async(session_name: str | None = None):
                             else:
                                 shared.console.print(f"[bold yellow]Undo last edit to:[/bold yellow] {undo_path}")
                                 shared.console.print(f"[dim]Edit history depth: {len(shared.state.edit_history)}[/dim]")
-                                if Confirm.ask("Restore previous content?", default=False):
+                                if shared._terminal_confirm("Restore previous content?", default=False):
                                     fp = _safe_path(undo_path)
                                     if fp:
                                         fp.write_text(undo_content, encoding="utf-8")
@@ -1087,7 +1086,7 @@ async def _chat_async(session_name: str | None = None):
                         shared.state.self_improve_active = False
                         shared.console.print("\n[bold yellow]Self-Improvement Complete.[/bold yellow]")
                         shared.console.print(f"[dim]Review changes: run_shell 'python -c \"import difflib,pathlib; a=pathlib.Path(\\\"main.py\\\").read_text().splitlines(); b=pathlib.Path(\\\".grokswarm/shadow/main.py\\\").read_text().splitlines(); print(chr(10).join(difflib.unified_diff(a,b,lineterm=\\\"\\\",n=3)))'[/dim]")
-                        if Confirm.ask("Promote shadow copy to main.py?", default=False):
+                        if shared._terminal_confirm("Promote shadow copy to main.py?", default=False):
                             check = subprocess.run(["python", "-m", "py_compile", str(shadow_file)], capture_output=True, text=True)
                             if check.returncode != 0:
                                 shared.console.print("[bold red]Shadow copy has syntax errors \u2014 promotion blocked.[/bold red]")
