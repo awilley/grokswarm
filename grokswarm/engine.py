@@ -138,21 +138,20 @@ async def _trim_conversation(conversation: list) -> list:
     return system + others
 
 
-async def _suspend_prompt_and_run(func):
-    """Suspend prompt_toolkit, run *func* in a thread, then resume.
+async def _suspend_prompt():
+    """Suspend prompt_toolkit so approval prompts can safely use the terminal.
 
-    Used for tools that call Confirm.ask() / console.input() for approval.
-    If no REPL is running, simply run in a thread without the suspend dance.
+    Call once before a batch of tools that may need user approval.
+    Pair with _resume_prompt() after the batch completes.
+    No-op if no REPL is running or already suspended.
     """
     app = shared._toolbar_app_ref
     if not app or not getattr(app, "is_running", False):
-        # No active REPL (e.g. tests, CLI commands) -- just run in thread
-        return await asyncio.to_thread(func)
+        return
+    if shared._is_prompt_suspended:
+        return  # already suspended
 
     async with shared._suspend_lock:
-        # Clear toolbar status BEFORE suspending so the final prompt_toolkit
-        # render cycle doesn't include spinner chars that leak into Rich output.
-        _saved_status = shared._toolbar_status
         shared._toolbar_status = ""
         shared._toolbar_suspended = True
         shared._is_prompt_suspended = True
@@ -166,18 +165,45 @@ async def _suspend_prompt_and_run(func):
         await shared._prompt_suspend_event.wait()
         shared._prompt_suspend_event.clear()
 
-        # Flush a clean line so Rich Confirm.ask() starts on a fresh row
+        # Clear terminal line so approval prompts start on a fresh row
         import sys
-        sys.stdout.write("\r\033[K")
-        sys.stdout.flush()
+        sys.__stdout__.write("\r\033[K")
+        sys.__stdout__.flush()
 
-        try:
-            return await asyncio.to_thread(func)
-        finally:
-            shared._is_prompt_suspended = False
-            shared._toolbar_suspended = False
-            shared._toolbar_status = _saved_status
-            shared._prompt_resume_event.set()
+
+def _resume_prompt():
+    """Resume prompt_toolkit after a batch of tools completes.
+
+    No-op if not currently suspended.
+    """
+    if not shared._is_prompt_suspended:
+        return
+    shared._is_prompt_suspended = False
+    shared._toolbar_suspended = False
+    shared._prompt_resume_event.set()
+
+
+async def _suspend_prompt_and_run(func):
+    """Suspend prompt_toolkit, run *func* in a thread, then resume.
+
+    Legacy wrapper -- used when a single tool needs approval outside
+    of the batch suspension path.  If prompt is already suspended
+    (batch mode), just runs in a thread without re-suspending.
+    """
+    app = shared._toolbar_app_ref
+    if not app or not getattr(app, "is_running", False):
+        return await asyncio.to_thread(func)
+
+    if shared._is_prompt_suspended:
+        # Already suspended by batch -- just run the function
+        return await asyncio.to_thread(func)
+
+    # One-off suspend/resume (shouldn't normally happen with batch mode)
+    await _suspend_prompt()
+    try:
+        return await asyncio.to_thread(func)
+    finally:
+        _resume_prompt()
 
 
 def _handle_test_failure(name: str, args: dict, result_str: str) -> str:
@@ -286,9 +312,11 @@ async def _execute_tool(name: str, args: dict, timed: bool = False):
         try:
             if is_threadable:
                 result = await asyncio.to_thread(handler, args)
+            elif shared._is_prompt_suspended:
+                # Prompt already suspended by batch -- run directly in thread
+                result = await asyncio.to_thread(handler, args)
             else:
-                # Clear status before suspending prompt for approval --
-                # prevents spinner chars leaking into Rich Confirm prompts.
+                # One-off suspension (shouldn't happen with batch mode)
                 shared._clear_status()
                 result = await _suspend_prompt_and_run(lambda: handler(args))
                 if asyncio.iscoroutine(result):
@@ -556,6 +584,15 @@ async def _stream_with_tools(conversation: list) -> str:
                     continue
             parsed_tools.append((tc, name, args))
 
+        # Determine threadable set for this round
+        if shared.state.trust_mode or shared.state.agent_mode > 0:
+            _round_threadable = _THREADABLE_TOOLS_TRUSTED
+        else:
+            _round_threadable = _THREADABLE_TOOLS_BASE
+
+        def _is_threadable(n: str) -> bool:
+            return n in _round_threadable or n.startswith("mcp_")
+
         try:
             all_read_only = all(n in READ_ONLY_TOOLS for _, n, _ in parsed_tools)
             can_parallelize = all_read_only and len(parsed_tools) > 1
@@ -587,27 +624,44 @@ async def _stream_with_tools(conversation: list) -> str:
                         "content": result_str,
                     })
             else:
+                # Check if ANY tool in this round needs approval (non-threadable).
+                # If so, suspend prompt_toolkit ONCE for the entire batch to
+                # prevent prompt flashing between sequential approvals.
+                _needs_suspension = any(
+                    not _is_threadable(n) for _, n, _ in parsed_tools
+                )
+                if _needs_suspension:
+                    shared._clear_status()
+                    await _suspend_prompt()
+
                 if not shared.state.verbose_mode:
                     _seq_names = ", ".join(n for _, n, _ in parsed_tools)
                     shared._set_status(f"working on: {_seq_names}")
-                for tc, name, args in parsed_tools:
-                    detail = _tool_detail(name, args)
-                    if shared.state.verbose_mode:
-                        shared.console.print(f"  [swarm.accent]\u26a1 {name}[/swarm.accent][dim]{detail}[/dim]")
-                    shared._log(f"\u26a1 {name}{detail}")
-                    t0 = time.perf_counter()
-                    result_str = await _execute_tool(name, args)
-                    elapsed = time.perf_counter() - t0
-                    if shared.state.verbose_mode and elapsed >= 0.5:
-                        shared.console.print(f"    [dim]\u2514 done ({elapsed:.1f}s)[/dim]")
-                    shared._log(f"\u2514 {name} done ({elapsed:.1f}s)")
-                    conversation.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": result_str,
-                    })
+                try:
+                    for tc, name, args in parsed_tools:
+                        detail = _tool_detail(name, args)
+                        if shared.state.verbose_mode:
+                            shared.console.print(f"  [swarm.accent]\u26a1 {name}[/swarm.accent][dim]{detail}[/dim]")
+                        shared._log(f"\u26a1 {name}{detail}")
+                        t0 = time.perf_counter()
+                        result_str = await _execute_tool(name, args)
+                        elapsed = time.perf_counter() - t0
+                        if shared.state.verbose_mode and elapsed >= 0.5:
+                            shared.console.print(f"    [dim]\u2514 done ({elapsed:.1f}s)[/dim]")
+                        shared._log(f"\u2514 {name} done ({elapsed:.1f}s)")
+                        conversation.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": result_str,
+                        })
+                finally:
+                    if _needs_suspension:
+                        _resume_prompt()
 
         except KeyboardInterrupt:
+            # Make sure prompt is resumed on interrupt
+            if shared._is_prompt_suspended:
+                _resume_prompt()
             shared.console.print("\n  [swarm.warning]\u26a0 Tool execution interrupted by user.[/swarm.warning]")
             responded_ids = {m["tool_call_id"] for m in conversation if m.get("role") == "tool"}
             for tc, name, args in parsed_tools:

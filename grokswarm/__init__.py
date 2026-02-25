@@ -22,7 +22,7 @@ from grokswarm.shared import (
     _open_session_log, _log,
     _redact_secrets, _sanitize_surrogates,
     SafeFileHistory,
-    _auto_approve,
+    _terminal_confirm, _auto_approve,
     AUTO_CHECKPOINT_THRESHOLD, MAX_EDIT_HISTORY,
     MAX_API_RETRIES, RETRY_BACKOFF,
     _api_call_with_retry,
@@ -98,7 +98,8 @@ from grokswarm.tools_mcp import register_mcp_tools, _load_mcp_config, _discover_
 from grokswarm.engine import (
     _estimate_tokens, _repair_json,
     _compact_conversation, _trim_conversation,
-    _suspend_prompt_and_run, _execute_tool, _tool_detail,
+    _suspend_prompt, _resume_prompt, _suspend_prompt_and_run,
+    _execute_tool, _tool_detail,
     _handle_test_failure, _maybe_auto_retest,
     _stream_with_tools,
     _THREADABLE_TOOLS_BASE, _THREADABLE_TOOLS_TRUSTED,
