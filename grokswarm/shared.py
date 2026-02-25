@@ -1,0 +1,248 @@
+"""Mutable globals, console, app, client, constants, and utility functions."""
+
+import os
+import re
+import asyncio
+import atexit
+import typer
+from pathlib import Path
+from datetime import datetime
+from rich.console import Console
+from rich.theme import Theme
+from rich.prompt import Confirm
+from dotenv import load_dotenv
+from openai import AsyncOpenAI
+from prompt_toolkit.history import FileHistory
+
+from grokswarm.models import SwarmState
+
+load_dotenv()
+
+# -- Theme & Console --
+SWARM_THEME = Theme({
+    "swarm.accent": "bold bright_green",
+    "swarm.dim": "dim white",
+    "swarm.user": "bold bright_cyan",
+    "swarm.ai": "bold bright_green",
+    "swarm.warning": "bold yellow",
+    "swarm.error": "bold red",
+})
+console = Console(theme=SWARM_THEME)
+app = typer.Typer(rich_markup_mode="rich", help="Grok Swarm -- your local persistent AI workhorse", invoke_without_command=True)
+
+THINKING_FRAMES = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
+
+# -- Module-level toolbar spinner state --
+_toolbar_status = ""
+_toolbar_spinner_idx = 0
+_toolbar_app_ref = None
+_toolbar_suspended = False
+
+# State for safely pausing the main prompt loop
+_prompt_suspend_event = asyncio.Event()
+_prompt_resume_event = asyncio.Event()
+_saved_prompt_text = ""
+_is_prompt_suspended = False
+_suspend_lock = asyncio.Lock()
+
+
+def _set_status(text: str):
+    global _toolbar_status, _toolbar_spinner_idx
+    _toolbar_status = text
+    _toolbar_spinner_idx = 0
+    if _toolbar_app_ref and not _toolbar_suspended:
+        try:
+            _toolbar_app_ref.invalidate()
+        except Exception:
+            pass
+
+
+def _clear_status():
+    global _toolbar_status
+    _toolbar_status = ""
+    if _toolbar_app_ref and not _toolbar_suspended:
+        try:
+            _toolbar_app_ref.invalidate()
+        except Exception:
+            pass
+
+
+# -- API Key & Client --
+XAI_API_KEY = os.getenv("XAI_API_KEY")
+if not XAI_API_KEY:
+    console.print("[swarm.error]Error: XAI_API_KEY not found in .env[/swarm.error]")
+    raise typer.Exit(1)
+
+client = AsyncOpenAI(
+    api_key=XAI_API_KEY,
+    base_url="https://api.x.ai/v1"
+)
+
+# -- Constants --
+VERSION = "0.30.0"
+MODEL = "grok-4-1-fast-reasoning"
+BASE_URL = "https://api.x.ai/v1"
+MAX_TOKENS = 16384
+CODE_MODEL: str | None = None
+
+# -- Pricing --
+MODEL_PRICING: dict[str, tuple[float, float]] = {
+    "grok-4-1-fast":            (0.20,  0.50),
+    "grok-4":                   (2.00,  8.00),
+    "grok-3":                   (3.00, 15.00),
+    "grok-3-fast":              (0.60,  3.00),
+    "grok-3-mini":              (0.30,  0.50),
+    "grok-2":                   (2.00, 10.00),
+    "grok-code-fast-1":         (0.20,  1.50),
+    "grok-4-1-fast-reasoning":  (0.20,  0.50),
+}
+_DEFAULT_PRICING = (0.20, 0.50)
+
+
+def _get_pricing(model: str) -> tuple[float, float]:
+    m = model.lower()
+    for prefix, rates in MODEL_PRICING.items():
+        if m.startswith(prefix):
+            return rates
+    return _DEFAULT_PRICING
+
+
+# -- State --
+state = SwarmState()
+
+# -- Input Queue --
+_input_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+
+def _drain_input_queue() -> list[str]:
+    items: list[str] = []
+    while True:
+        try:
+            items.append(_input_queue.get_nowait())
+        except asyncio.QueueEmpty:
+            break
+    return items
+
+
+# -- Session Log --
+_session_log_file = None
+
+
+def _open_session_log():
+    global _session_log_file
+    log_dir = PROJECT_DIR / ".grokswarm"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    _session_log_file = open(log_dir / "session.log", "a", encoding="utf-8")
+
+
+def _log(msg: str):
+    global _session_log_file
+    if _session_log_file is None:
+        try:
+            _open_session_log()
+        except OSError:
+            return
+    try:
+        ts = datetime.now().strftime("%H:%M:%S")
+        _session_log_file.write(f"[{ts}] {msg}\n")
+        _session_log_file.flush()
+    except OSError:
+        pass
+
+
+# -- Directories --
+GROKSWARM_HOME = Path(os.environ.get("GROKSWARM_HOME", Path(__file__).resolve().parent.parent)).resolve()
+PROJECT_DIR = Path.cwd().resolve()
+PROJECT_CONTEXT: dict = {}
+SYSTEM_PROMPT: str = ""
+
+SKILLS_DIR = Path("skills")
+EXPERTS_DIR = Path("experts")
+TEAMS_DIR = Path("teams")
+MEMORY_DIR = Path("memory")
+SESSIONS_DIR = Path.home() / ".grokswarm" / "sessions"
+CONTEXT_CACHE_DIR = Path.home() / ".grokswarm" / "cache"
+_RECENT_PROJECTS_FILE = Path.home() / ".grokswarm" / "recent_projects.json"
+SKILLS_DIR.mkdir(exist_ok=True)
+EXPERTS_DIR.mkdir(exist_ok=True)
+TEAMS_DIR.mkdir(exist_ok=True)
+MEMORY_DIR.mkdir(exist_ok=True)
+SESSIONS_DIR.mkdir(exist_ok=True, parents=True)
+CONTEXT_CACHE_DIR.mkdir(exist_ok=True, parents=True)
+
+
+# -- Background tasks --
+_agent_counter = 0
+_background_tasks: dict[str, asyncio.Task] = {}
+
+# -- Bus instance --
+_bus_instance = None
+
+
+# -- Secret patterns --
+_SECRET_PATTERNS = [
+    re.compile(r'sk-[a-zA-Z0-9]{20,}'),
+    re.compile(r'xai-[a-zA-Z0-9]{20,}'),
+    re.compile(r'-----BEGIN[A-Z ]*PRIVATE KEY-----'),
+    re.compile(r'eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}'),
+    re.compile(r'(?i)(?:api[_-]?key|secret|token|password)\s*[=:]\s*["\']?[a-zA-Z0-9_/+=-]{16,}'),
+    re.compile(r'(?i)bearer\s+[a-zA-Z0-9_./-]{20,}'),
+]
+
+
+def _redact_secrets(text: str) -> str:
+    for pat in _SECRET_PATTERNS:
+        text = pat.sub('[REDACTED]', text)
+    return text
+
+
+def _sanitize_surrogates(text: str) -> str:
+    return text.encode('utf-8', errors='replace').decode('utf-8')
+
+
+class SafeFileHistory(FileHistory):
+    """FileHistory that strips surrogate characters before writing (Windows clipboard fix)."""
+    def store_string(self, string: str) -> None:
+        super().store_string(string.encode('utf-8', errors='replace').decode('utf-8'))
+
+
+def _auto_approve(prompt: str, default: bool = True) -> bool:
+    """Auto-approve in trust mode or agent mode, otherwise prompt the user."""
+    if state.trust_mode or state.agent_mode > 0:
+        return True
+    return Confirm.ask(prompt, default=default)
+
+
+# -- Auto-Checkpoint Constants --
+AUTO_CHECKPOINT_THRESHOLD = 5
+MAX_EDIT_HISTORY = 20
+
+
+# -- API retry --
+MAX_API_RETRIES = 3
+RETRY_BACKOFF = [2, 5, 10]
+
+
+async def _api_call_with_retry(call_fn, label: str = "API call"):
+    last_error = None
+    for attempt in range(MAX_API_RETRIES):
+        try:
+            return await call_fn()
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            last_error = e
+            if isinstance(e, UnicodeEncodeError):
+                raise
+            err_str = str(e).lower()
+            if any(k in err_str for k in ("401", "403", "invalid_api_key", "authentication")):
+                raise
+            if attempt < MAX_API_RETRIES - 1:
+                wait = RETRY_BACKOFF[attempt]
+                console.print(f"  [swarm.warning]\u26a0 {label} failed (attempt {attempt + 1}/{MAX_API_RETRIES}): {type(e).__name__}: {str(e)[:100]}[/swarm.warning]")
+                console.print(f"  [swarm.dim]  retrying in {wait}s...[/swarm.dim]")
+                await asyncio.sleep(wait)
+            else:
+                console.print(f"  [swarm.error]\u2718 {label} failed after {MAX_API_RETRIES} attempts: {e}[/swarm.error]")
+                raise
+    raise last_error

@@ -1,62 +1,35 @@
 # GrokSwarm — Task Tracker
 
-**Last updated:** February 20, 2026
-**Current version:** v0.25.0
-**Source:** [FEEDBACK_EVAL.md](FEEDBACK_EVAL.md) — consolidated from reviews by Grok, GPT, Gemini, Copilot
+**Last updated:** February 21, 2026
+**Current version:** v0.30.0
 
 ---
 
-## v0.22.1 Bug Fixes (from FEEDBACK_EVAL Tier 1 + Tier 2)
+## Next Generation: Hierarchical, Asynchronous Swarm (v0.27.0+)
 
-### Tier 1 — Critical / Security (all DONE)
+This is the roadmap to transform GrokSwarm from a flat, sequential tool into a dynamic, parallel, hierarchical agent swarm with deep observability and real-time human interaction.
 
-- [x] **B1** — Add `global _trust_mode, _session_read_only` in `chat()` — DONE v0.22.1
-  - `/trust` and `/readonly` previously crashed with `UnboundLocalError` (GPT)
-- [x] **B2** — Capture pre-edit file content BEFORE tool handler runs — DONE v0.22.1
-  - `/undo` previously restored post-edit state (no-op). Now captures true pre-state (GPT)
-- [x] **B3+B4** — Clear `_edit_history` and reset `_test_fix_state` in `_switch_project()` — DONE v0.22.1
-  - Prevents undo stack and test-fix loop leaking across projects (Gemini)
-- [x] **B5** — Add `169.254.x.x` to `_SSRF_BLOCKED` regex — DONE v0.22.1
-  - Blocks cloud metadata IP (AWS/GCP/Azure credential theft vector) (Gemini)
+### Phase 1: Async Core & State Machine (v0.27.0) ✅
+- [x] **Refactor Core Loop:** Rewrite `chat()` and `_execute_tool()` to use `asyncio` so multiple agents can run concurrently.
+- [x] **Agent State Machine:** Implement states (`IDLE`, `THINKING`, `WORKING`, `PAUSED`, `WAITING_ON_DEPENDENCY`) for agents.
+- [x] **CLI Multiplexing:** Update the `prompt_toolkit` CLI to remain responsive while agents work in the background.
 
-### Tier 2 — Consistency / Correctness (all DONE)
+### Phase 2: Spawning & Messaging Tools (v0.28.0) ✅
+- [x] **`spawn_agent` Tool:** Give the LLM the ability to spawn sub-agents with specific roles, instructions, and budgets.
+- [x] **`send_message` Tool:** Allow agents to send direct messages to other agents for negotiation and coordination.
+- [x] **Async SwarmBus:** Upgrade the SQLite `SwarmBus` to support async pub/sub so agents can listen for messages addressed to them.
 
-- [x] **B6** — `/context refresh` now saves to cache after scanning — DONE v0.22.1
-  - Previously bypassed cache entirely; next startup loaded stale data (GPT)
-- [x] **B7** — Align `_incremental_context_refresh` symbol cap from 40 → 15 — DONE v0.22.1
-  - Matches `_build_deep_symbol_index` cap; prevents prompt drift after edits (GPT)
-- [x] **B8** — Raise `_project_mtime()` max_files from 100 → 10,000 — DONE v0.22.1
-  - Cache invalidation now covers virtually all real projects (GPT + Gemini)
-- [x] **B9** — Remove `run_tests` from read-only blocked tools — DONE v0.22.1
-  - Tests are non-mutating; now allowed in `/readonly` mode (GPT)
-- [x] **B10** — Add pytest gate to `/self-improve` promotion — DONE v0.22.1
-  - Runs `pytest test_grokswarm.py -x -q` before allowing shadow → main.py copy (Grok)
-- [x] **B11** — Hoist `MUTATING_TOOLS` to module-level `_READONLY_BLOCKED_TOOLS` — DONE v0.22.1
-  - No longer rebuilt on every `_execute_tool` call (GPT)
+### Phase 3: Resource Management & Master Control (v0.29.0) ✅
+- [x] **Budget Tracking:** Implement a `ResourceManager` to track token/cost budgets globally and per-agent.
+- [x] **Out-of-Funds State:** Agents hit a `PAUSED_OUT_OF_FUNDS` state when they exceed their budget and must negotiate for more.
+- [x] **Real-Time Interruption:** Implement `/pause <agent>` and `/resume <agent>` commands to control agents mid-task.
+
+### Phase 4: The Panopticon TUI Dashboard (v0.30.0) ✅
+- [x] **Rich TUI Framework:** Upgrade `/dashboard` using advanced `Rich` live display with Tree view.
+- [x] **Live Tree View:** Visualize the agent hierarchy (e.g., `CEO -> [BackendLead, FrontendLead]`).
+- [x] **Live State & Feed:** Show real-time agent states, budget usage, and a live feed of inter-agent `SwarmBus` messages.
 
 ---
-
-## Tier 3 — Polish (all DONE)
-
-- [x] **L3** — Migrate mutable session globals to `SwarmState` dataclass — DONE v0.25.0
-- [x] **L4** — Docs/naming harmonization across `SLASH_COMMANDS` + `/help` text — DONE v0.25.0
-- [x] **A8** — Token Usage & Cost Metrics panel in dashboard + `/metrics` command — DONE v0.26.0
-
-## v0.24.0 Features (all DONE)
-
-- [x] **A3** — Dynamic tool registration — skills saved via `create_skill` are auto-registered as callable LLM tools (`skill_{name}`) — DONE v0.24.0
-- [x] **L2** — `/doctor` checks for chromium browser binary (not just `import playwright`) — DONE v0.24.0
-
-## v0.23.0 Features (all DONE)
-
-- [x] **B12** — `/undo` deletes newly created files (stores `(path, None)` sentinel) — DONE v0.23.0
-- [x] **L1** — Tab-complete `/project` paths (directory completer + recent projects + subcmds) — DONE v0.23.0
-- [x] **A6** — Isolated test validation for `/self-improve` (copies shadow + tests to temp dir) — DONE v0.23.0
-
-## P3 — Defer
-
-- [x] **A4** — SQLite coordination bus for multi-agent messaging — DONE v0.25.0
-- [x] **A5** — Live TUI dashboard (`grokswarm dashboard`) — DONE v0.25.0
 
 ## Rejected
 
@@ -76,6 +49,11 @@
 
 ## Completed Releases
 
+- [x] v0.30.0 — Phase 4 Panopticon Dashboard: Rich Tree agent hierarchy view, live state indicators, budget tracking display, status/error message feed. 176 tests pass.
+- [x] v0.29.0 — Phase 3 Resource Management: per-agent token/cost budgets (AgentInfo.check_budget/add_usage), global budget tracking, /pause and /resume slash commands, PAUSED state for over-budget agents. 176 tests pass.
+- [x] v0.28.0 — Phase 2 Spawning & Messaging: spawn_agent tool (background asyncio.Task), send_message tool (SwarmBus direct messaging), check_messages and list_agents tools, agent_name support in run_expert. 176 tests pass.
+- [x] v0.27.0 — Phase 1 Async Core: full asyncio refactor (AsyncOpenAI, async _execute_tool/_stream_with_tools/_compact_conversation/analyze_image, asyncio.gather parallel tools, prompt_async CLI), AgentState enum + AgentInfo dataclass state machine. 149 tests pass.
+- [x] v0.26.0 — A8 Token Usage & Cost Metrics panel in dashboard + `/metrics` command. 149 tests pass.
 - [x] v0.25.0 — L3 SwarmState refactor, L4 docs/naming harmonization, A4 SQLite SwarmBus coordination, A5 live `dashboard` command. 149 tests pass.
 - [x] v0.24.0 — A3 dynamic tool registration (skills auto-register as callable LLM tools on load + create), L2 /doctor chromium binary check. 142 tests pass.
 - [x] v0.23.0 — B12 undo-delete for new files, L1 /project tab-completion (dir completer + recent list), A6 isolated temp-dir test validation for /self-improve promotion. 138 tests pass.

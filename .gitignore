@@ -1,1 +1,25 @@
-/.env
+# Environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Testing
+.pytest_cache/
+
+# GrokSwarm runtime
+chroma_db/
+memory/
+temp/
+.grokswarm/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

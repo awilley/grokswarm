@@ -1,0 +1,8 @@
+description: Generate boilerplate Textual App with header, content, footer, key bindings.
+name: textual_tui_scaffold
+steps:
+- Create App class
+- Add Header, Footer
+- Bind keys
+- Mount widgets
+version: '1.0'

@@ -13,9 +13,15 @@ It should feel like a real digital team that:
 - Is delightful and fast to use (better than Claude CLI)
 
 ## Core Requirements (Must-Haves)
+- Must be able to fully test and validate anything the user is asking it to do. so if its a web app it should robustly have test code and also look and interact with the website itself check ux, ui, function etc... same for any other app or feature. test that it will work. we want as close to one shot completion without needing to bug the user. only exception is when the task needs clarification. then ask user. but we don't want the user in the debug loop.
+- grok should not ever tell the user "end of conversation". it should work to find workarounds/and solutions to help achieve users goals.
+- grok should show the user it understands the request before starting whever there is any doubt.
+- sub agents should confirm by showing to parent agent they understand their job task in a descriptive way for the parent agent to evaluate and confirm alignment
 - Local-first (everything runs on my PC, no cloud dependency except the Grok API)
 - Multiple specialized Grok agents (experts) that can work independently or collaborate
 - Persistent Skill Registry (human-editable, self-extending)
+- Skills should be well documented with great detail to be very powerful instruction with clarity on how to achieve tasks. they can have examples and notes of things to watch out for.
+- there should be a bug tracker for each project
 - Persistent Expert Registry (mindsets, objectives, KPIs)
 - Multi-agent Supervisor with dynamic self-organization and saved teams
 - Persistent memory & command history (survives restarts)
@@ -23,6 +29,13 @@ It should feel like a real digital team that:
 - Beautiful, fast interactive mode with streaming responses and tab completion
 - Short, convenient CLI (grokswarm)
 - Keep a terminal open when active (no forced daemon for now)
+- Agent tools: tools generation capabilities. create tools that can be used by agents in the app when appropriate. agents can give explicit access to selective tools to sub agents as needed. sub agents otherwise must ask permission to parent agent and give justification. the parent agent must decide if its really needed. 
+
+## other thoughts
+- double escape or some way to cancel request in main window with primary managing agent
+- the queuing of other queres should be done in parallel not  serieally... maybe.. neds more though
+- the main agent should show up in our watch list too. any agent instance needs to show up there
+
 
 ## Current Status (as of Feb 20, 2026)
 - ✅ Short grokswarm CLI with clean interactive mode

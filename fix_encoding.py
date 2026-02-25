@@ -1,6 +1,8 @@
 """Fix mojibake in main.py - direct pattern replacement for corrupted UTF-8."""
 
-filepath = r"c:\Users\aaron\grokswarm\main.py"
+import os
+
+filepath = os.path.join(os.path.dirname(__file__), "main.py")
 
 with open(filepath, "r", encoding="utf-8") as f:
     content = f.read()

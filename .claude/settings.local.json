@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.x.ai)",
+      "Bash(claude mcp:*)",
+      "Bash(cd:*)",
+      "mcp__xai-docs__list_doc_pages",
+      "mcp__xai-docs__search_docs",
+      "mcp__xai-docs__get_doc_page",
+      "Bash(wc:*)"
+    ]
+  }
+}

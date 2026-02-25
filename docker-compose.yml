@@ -1,8 +1,0 @@
-services:
-  grokswarm:
-    build: .
-    volumes:
-      - .:/app
-    environment:
-      - XAI_API_KEY=${XAI_API_KEY}
-    command: tail -f /dev/null
