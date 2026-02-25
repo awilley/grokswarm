@@ -1346,7 +1346,7 @@ class TestRunExpert:
             result = asyncio.run(_main.run_expert("coder", "Create a file", agent_name="test-coder"))
 
         assert "Done! File created." in result
-        assert call_count == 2, "Should make 2 API calls (tool call + final)"
+        assert call_count == 3, "Should make 3 API calls (tool call + verification gate + final)"
         assert "write_file" in executed_tools
         _shared.EXPERTS_DIR = old_dir
         _main.state.agents.pop("test-coder", None)
