@@ -1526,12 +1526,13 @@ class TestPlanGate:
         assert PlanGate.check_tool_allowed(agent, "edit_file") is None
         assert PlanGate.check_tool_allowed(agent, "run_shell") is None
 
-    def test_check_plan_ready_requires_two_steps(self):
+    def test_check_plan_ready_accepts_single_step(self):
         agent = self._make_agent()
         agent.plan = []
         assert not PlanGate.check_plan_ready(agent)
+        # Single-step plans are fine for simple tasks
         agent.plan = [{"step": "a", "status": "pending"}]
-        assert not PlanGate.check_plan_ready(agent)
+        assert PlanGate.check_plan_ready(agent)
         agent.plan = [{"step": "a", "status": "pending"}, {"step": "b", "status": "pending"}]
         assert PlanGate.check_plan_ready(agent)
 
@@ -1663,6 +1664,15 @@ class TestEvidenceTracker:
         warnings = et.check_stale_reads()
         assert len(warnings) == 0
 
+    def test_model_tracking(self):
+        et = EvidenceTracker()
+        et.record_model("grok-4.20-experimental-beta-latest")
+        et.record_model("grok-4-1-fast-reasoning")
+        et.record_model("grok-4-1-fast-reasoning")
+        summary = et.get_evidence_summary()
+        assert summary["models_used"]["grok-4.20-experimental-beta-latest"] == 1
+        assert summary["models_used"]["grok-4-1-fast-reasoning"] == 2
+
 
 class TestToolFilter:
     def test_get_tools_for_expert_with_whitelist(self):
@@ -1675,20 +1685,39 @@ class TestToolFilter:
         result = ToolFilter.get_tools_for_expert(expert)
         assert result is None  # None = all tools
 
-    def test_model_routing_planning(self):
+    def test_model_routing_planning_uses_hardcore(self):
         expert = {"model_preference": "reasoning"}
         model = ToolFilter.get_model_for_phase(expert, "planning")
-        assert model == "grok-3-fast"
+        assert model == "grok-4.20-experimental-beta-latest"
 
-    def test_model_routing_executing(self):
+    def test_model_routing_planning_fast_expert_uses_reasoning(self):
+        # Fast experts still get reasoning for planning (not non-reasoning)
+        expert = {"model_preference": "fast"}
+        model = ToolFilter.get_model_for_phase(expert, "planning")
+        assert model == "grok-4-1-fast-reasoning"
+
+    def test_model_routing_executing_fast(self):
         expert = {"model_preference": "fast"}
         model = ToolFilter.get_model_for_phase(expert, "executing")
-        assert model == "grok-3-fast"
+        assert model == "grok-4-1-fast-non-reasoning"
 
-    def test_model_routing_default(self):
+    def test_model_routing_executing_reasoning(self):
+        expert = {"model_preference": "reasoning"}
+        model = ToolFilter.get_model_for_phase(expert, "executing")
+        assert model == "grok-4-1-fast-reasoning"
+
+    def test_model_routing_default_is_reasoning(self):
         expert = {}
         model = ToolFilter.get_model_for_phase(expert, "executing")
-        assert model == _shared.MODEL
+        assert model == "grok-4-1-fast-reasoning"
+
+    def test_escalation_model(self):
+        model = ToolFilter.get_model_for_escalation()
+        assert model == "grok-4.20-experimental-beta-latest"
+
+    def test_orchestrator_model(self):
+        model = ToolFilter.get_orchestrator_model()
+        assert model == "grok-4.20-multi-agent-experimental-beta-latest"
 
 
 class TestExtractFilesFromPlan:
