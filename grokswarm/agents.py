@@ -1,6 +1,7 @@
 """SwarmBus, spawning, messaging, run_supervisor, run_expert, cost tracking."""
 
 import json
+import sys
 import yaml
 import sqlite3
 import asyncio
@@ -770,7 +771,8 @@ PLANNING (MANDATORY):
             verification_issues = verification_result.get("issues", [])
 
         # -- Post-completion smoke test --
-        if made_file_mutations and not ran_tests:
+        # Only run if mutations were made, tests weren't run, and we're not inside pytest
+        if made_file_mutations and not ran_tests and "pytest" not in sys.modules:
             shared._log(f"agent {display_name}: post-completion smoke test (files mutated, no tests)")
             try:
                 from grokswarm.tools_test import run_tests as _run_tests_fn
