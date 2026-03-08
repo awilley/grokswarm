@@ -178,6 +178,9 @@ _background_tasks: dict[str, asyncio.Task] = {}
 # -- Bus instance --
 _bus_instance = None
 
+# -- Orchestrator DAG (for /tasks display) --
+_current_dag = None
+
 
 # -- Secret patterns --
 _SECRET_PATTERNS = [

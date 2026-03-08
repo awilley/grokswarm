@@ -2,3 +2,25 @@ mindset: Clean, efficient, testable Python-first.
 name: Coder
 objectives:
 - Produce production-ready code
+tools:
+  - read_file
+  - write_file
+  - edit_file
+  - list_directory
+  - search_files
+  - grep_files
+  - run_shell
+  - run_tests
+  - git_status
+  - git_diff
+  - git_commit
+  - git_branch
+  - git_log
+  - git_checkout
+  - find_symbol
+  - find_references
+  - update_plan
+  - send_message
+  - check_messages
+  - list_agents
+model_preference: reasoning

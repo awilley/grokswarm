@@ -40,6 +40,7 @@ from grokswarm.agents import (
     get_bus, run_supervisor, run_expert, _load_project_costs,
     _list_agents_impl,
 )
+from grokswarm.guardrails import PlanGate, Orchestrator, drain_notifications
 
 
 # -- Context-Aware Tab Completion --
@@ -282,6 +283,9 @@ def _show_help():
         ("/swarm <task>", "Run multi-agent supervisor"),
         ("/abort", "Abort currently running swarm"),
         ("/tell <agent> <msg>", "Send guidance to a running agent mid-task"),
+        ("/approve <agent>", "Approve an agent's plan (transition to execution)"),
+        ("/reject <agent> <feedback>", "Reject plan and send feedback"),
+        ("/tasks", "Show orchestrator task DAG with dependencies"),
         ("/experts", "List available experts"),
         ("/skills", "List available skills"),
         ("/context", "Show project context (refresh to rescan)"),
@@ -455,22 +459,20 @@ async def _swarm_async(description: str):
     from grokswarm.dashboard import _watch_agents
     from rich.rule import Rule
 
-    plan = await run_supervisor(description)
     bus = get_bus()
     bus.clear()
     shared.state.clear_swarm()
-    bus.post("supervisor", json.dumps(plan), kind="plan")
-    experts = plan.get("experts", ["assistant"])
 
-    swarm_tasks: dict[str, asyncio.Task] = {}
-    for expert_name in experts:
-        async def _run(name=expert_name):
-            return await run_expert(name, description, bus=bus)
-        task = asyncio.create_task(_run())
-        swarm_tasks[expert_name] = task
-        shared._background_tasks[expert_name] = task
+    # Use orchestrator for task decomposition and DAG-based execution
+    orchestrator_task = asyncio.create_task(Orchestrator.run(description, bus))
 
     await _watch_agents(task_description=description)
+
+    # Wait for orchestrator to finish if not done
+    try:
+        await orchestrator_task
+    except Exception as e:
+        shared.console.print(f"[swarm.error]Orchestrator error: {e}[/swarm.error]")
 
     shared.console.print()
     shared.console.print(Rule("[bold]Swarm Summary[/bold]", style="cyan"))
@@ -478,30 +480,29 @@ async def _swarm_async(description: str):
     summary_table.add_column("Agent", style="cyan", width=18)
     summary_table.add_column("Status", width=10)
     summary_table.add_column("Tokens", justify="right", width=10)
-    summary_table.add_column("Tools Used", width=30)
+    summary_table.add_column("Cost", justify="right", width=10)
     summary_table.add_column("Output", ratio=1)
-    for expert_name, task in swarm_tasks.items():
-        agent = shared.state.get_agent(expert_name)
-        agent_state = agent.state.value if agent else "unknown"
-        tokens = agent.tokens_used if agent else 0
-        status_color = "green" if agent_state == "done" else "red"
-        try:
-            result_text = task.result() if task.done() else "(still running)"
-        except Exception as e:
-            result_text = f"Error: {e}"
-        summary = (result_text or "")[:80].replace("\n", " ")
-        tool_msgs = [m for m in bus.read(limit=50) if m.get("sender") == expert_name and m.get("kind") == "status"]
-        tool_summary = tool_msgs[-1].get("body", "")[:30] if tool_msgs else ""
+    for agent_name, agent in shared.state.agents.items():
+        agent_state = agent.state.value
+        tokens = agent.tokens_used
+        status_color = "green" if agent_state == "done" else "red" if agent_state == "error" else "yellow"
         summary_table.add_row(
-            expert_name,
+            agent_name,
             f"[{status_color}]{agent_state}[/{status_color}]",
             f"{tokens:,}",
-            tool_summary,
-            summary,
+            f"${agent.cost_usd:.4f}",
+            agent.task[:60],
         )
     shared.console.print(summary_table)
-    total_tokens = sum((shared.state.get_agent(n).tokens_used if shared.state.get_agent(n) else 0) for n in swarm_tasks)
-    shared.console.print(f"  [dim]Total: {len(swarm_tasks)} agents, {total_tokens:,} tokens, ${shared.state.global_cost_usd:.4f}[/dim]")
+    total_tokens = sum(a.tokens_used for a in shared.state.agents.values())
+    shared.console.print(f"  [dim]Total: {len(shared.state.agents)} agents, {total_tokens:,} tokens, ${shared.state.global_cost_usd:.4f}[/dim]")
+
+    # Show task DAG summary if available
+    dag = getattr(shared, '_current_dag', None)
+    if dag and dag.subtasks:
+        done = sum(1 for t in dag.subtasks if t.status == "done")
+        failed = sum(1 for t in dag.subtasks if t.status == "failed")
+        shared.console.print(f"  [dim]DAG: {done}/{len(dag.subtasks)} tasks done, {failed} failed[/dim]")
     shared.console.print()
 
 
@@ -677,6 +678,23 @@ async def _chat_async(session_name: str | None = None):
         if shared._toolbar_status and not shared._is_prompt_suspended:
             icon = shared.THINKING_FRAMES[shared._toolbar_spinner_idx % len(shared.THINKING_FRAMES)]
             parts.append(f"  <ansicyan>{icon}</ansicyan> <ansiwhite>{shared._toolbar_status}</ansiwhite>")
+        # Show active agents with current step
+        active_agents = [(n, a) for n, a in shared.state.agents.items()
+                         if a.state in (AgentState.THINKING, AgentState.WORKING)]
+        if active_agents:
+            agent_parts = []
+            for aname, ag in active_agents[:2]:
+                if ag.plan:
+                    current = next((s for s in ag.plan if s["status"] == "in-progress"), None)
+                    done = sum(1 for s in ag.plan if s["status"] == "done")
+                    total = len(ag.plan)
+                    if current:
+                        agent_parts.append(f"{aname}: Step {done+1}/{total} \"{current['step'][:30]}\"")
+                    else:
+                        agent_parts.append(f"{aname}: {ag.phase.title()}...")
+                else:
+                    agent_parts.append(f"{aname}: {ag.phase.title()}...")
+            parts.append(f"  <ansidarkgray>{len(active_agents)} agent{'s' if len(active_agents) != 1 else ''} running | {' | '.join(agent_parts)}</ansidarkgray>")
         parts.append(
             f"  <ansimagenta>\u25b6\u25b6</ansimagenta> <ansidarkgray>mode:</ansidarkgray> {mode_str}  <ansidarkgray>(shift+tab to cycle)</ansidarkgray>"
         )
@@ -720,6 +738,15 @@ async def _chat_async(session_name: str | None = None):
                     await shared._prompt_resume_event.wait()
                     shared._prompt_resume_event.clear()
                     continue
+
+                # -- Drain guardrails notifications --
+                for _level, _msg in drain_notifications():
+                    if _level == "warning":
+                        shared.console.print(f"[bold yellow]{_msg}[/]")
+                    elif _level == "error":
+                        shared.console.print(f"[bold red]{_msg}[/]")
+                    else:
+                        shared.console.print(f"[dim]{_msg}[/]")
 
                 def get_message():
                     _cols = shutil.get_terminal_size((80, 20)).columns
@@ -1053,6 +1080,51 @@ async def _chat_async(session_name: str | None = None):
                                 agent.pause_requested = False
                                 agent.transition(AgentState.IDLE)
                                 shared.console.print(f"[green]Agent '{arg.strip()}' resumed.[/green]")
+                    elif cmd == "approve":
+                        if not arg:
+                            shared.console.print("[swarm.warning]Usage: /approve <agent_name>[/swarm.warning]")
+                        else:
+                            agent = shared.state.get_agent(arg.strip())
+                            if agent is None:
+                                shared.console.print(f"[red]Agent '{arg.strip()}' not found.[/red]")
+                            elif agent.phase != "planning":
+                                shared.console.print(f"[yellow]Agent '{arg.strip()}' is not in planning phase (phase={agent.phase}).[/yellow]")
+                            else:
+                                PlanGate.transition_to_executing(agent)
+                                get_bus().post("user", "Plan approved", recipient=arg.strip(), kind="nudge")
+                                shared.console.print(f"[green]Agent '{arg.strip()}' plan approved -- now executing ({len(agent.plan)} steps).[/green]")
+                    elif cmd == "reject":
+                        if not arg:
+                            shared.console.print("[swarm.warning]Usage: /reject <agent_name> <feedback>[/swarm.warning]")
+                        else:
+                            reject_parts = arg.split(maxsplit=1)
+                            target_name = reject_parts[0]
+                            feedback = reject_parts[1] if len(reject_parts) > 1 else "Plan rejected. Revise your approach."
+                            agent = shared.state.get_agent(target_name)
+                            if agent is None:
+                                shared.console.print(f"[red]Agent '{target_name}' not found.[/red]")
+                            else:
+                                agent.phase = "planning"
+                                agent.approved_plan = None
+                                get_bus().post("user", f"Plan rejected: {feedback}", recipient=target_name, kind="nudge")
+                                shared.console.print(f"[yellow]Agent '{target_name}' plan rejected -- back to planning.[/yellow]")
+                    elif cmd == "tasks":
+                        dag = getattr(shared, '_current_dag', None)
+                        if dag and dag.subtasks:
+                            task_table = Table(title=f"[bold cyan]Task DAG[/bold cyan] -- {dag.goal[:60]}", border_style="dim", width=100)
+                            task_table.add_column("ID", width=6)
+                            task_table.add_column("Status", width=10)
+                            task_table.add_column("Expert", width=14)
+                            task_table.add_column("Description", ratio=1)
+                            task_table.add_column("Depends", width=12)
+                            _status_colors = {"pending": "dim", "running": "yellow", "done": "green", "failed": "red"}
+                            for st in dag.subtasks:
+                                color = _status_colors.get(st.status, "white")
+                                deps = ", ".join(st.depends_on) if st.depends_on else "-"
+                                task_table.add_row(st.id, f"[{color}]{st.status}[/{color}]", st.expert, st.description[:60], deps)
+                            shared.console.print(task_table)
+                        else:
+                            shared.console.print("[dim]No task DAG active. Use /swarm to start one.[/dim]")
                     elif cmd == "self-improve":
                         if not arg:
                             shared.console.print("[swarm.warning]Usage: /self-improve <description of improvement>[/swarm.warning]")

@@ -2,3 +2,19 @@ mindset: Thorough, source-critical, always cites latest data.
 name: Researcher
 objectives:
 - Deliver comprehensive, up-to-date summaries
+tools:
+  - read_file
+  - list_directory
+  - search_files
+  - grep_files
+  - web_search
+  - x_search
+  - fetch_page
+  - extract_links
+  - find_symbol
+  - find_references
+  - update_plan
+  - send_message
+  - check_messages
+  - list_agents
+model_preference: fast

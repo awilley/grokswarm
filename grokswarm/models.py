@@ -29,6 +29,10 @@ class AgentInfo:
     parent: str | None = None
     pause_requested: bool = False
     plan: list[dict] = field(default_factory=list)
+    # Guardrails: plan-then-execute
+    phase: str = "planning"  # "planning" | "executing" | "verifying"
+    approved_plan: list[dict] | None = None  # frozen copy of approved plan
+    plan_files_allowed: set[str] = field(default_factory=set)  # files agent declared it would touch
 
     def transition(self, new_state: AgentState):
         self.state = new_state
@@ -100,3 +104,36 @@ class SwarmState:
             if not task.done():
                 task.cancel()
         _background_tasks.clear()
+
+
+@dataclass
+class SubTask:
+    """A single sub-task in an orchestrated task DAG."""
+    id: str
+    description: str
+    expert: str
+    depends_on: list[str] = field(default_factory=list)
+    status: str = "pending"  # pending | running | done | failed
+    deliverables: list[str] = field(default_factory=list)
+    result_summary: str = ""
+    agent_name: str = ""
+
+
+@dataclass
+class TaskDAG:
+    """Directed acyclic graph of sub-tasks for orchestrated execution."""
+    goal: str
+    subtasks: list[SubTask] = field(default_factory=list)
+    current_phase: int = 0
+
+    def ready_tasks(self) -> list[SubTask]:
+        """Tasks whose dependencies are all 'done'."""
+        done_ids = {t.id for t in self.subtasks if t.status == "done"}
+        return [t for t in self.subtasks
+                if t.status == "pending" and all(d in done_ids for d in t.depends_on)]
+
+    def is_complete(self) -> bool:
+        return all(t.status in ("done", "skipped") for t in self.subtasks)
+
+    def failed_tasks(self) -> list[SubTask]:
+        return [t for t in self.subtasks if t.status == "failed"]

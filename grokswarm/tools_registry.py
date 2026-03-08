@@ -686,9 +686,16 @@ _UPDATE_PLAN_SCHEMA = {
 _AGENT_EXCLUDED_TOOLS = {"spawn_agent"}
 
 
-def get_agent_tool_schemas() -> list[dict]:
-    """Build agent tool schemas dynamically so MCP tools registered after import are included."""
-    return [t for t in TOOL_SCHEMAS if t.get("function", {}).get("name") not in _AGENT_EXCLUDED_TOOLS] + [_UPDATE_PLAN_SCHEMA]
+def get_agent_tool_schemas(allowed_tools: set[str] | None = None) -> list[dict]:
+    """Build agent tool schemas dynamically so MCP tools registered after import are included.
+    If allowed_tools is provided, only include tools in that set."""
+    base = [t for t in TOOL_SCHEMAS if t.get("function", {}).get("name") not in _AGENT_EXCLUDED_TOOLS]
+    base.append(_UPDATE_PLAN_SCHEMA)
+    if allowed_tools:
+        # Always allow update_plan even if not explicitly listed
+        allowed_with_plan = allowed_tools | {"update_plan"}
+        base = [t for t in base if t.get("function", {}).get("name") in allowed_with_plan]
+    return base
 
 
 # Static snapshot for backward compat — prefer get_agent_tool_schemas() for fresh list

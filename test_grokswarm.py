@@ -1457,3 +1457,301 @@ class TestSyntax:
             capture_output=True, text=True,
         )
         assert result.returncode == 0, f"test file has syntax errors:\n{result.stderr}"
+
+    def test_guardrails_compiles(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "py_compile",
+             str(Path(__file__).parent / "grokswarm" / "guardrails.py")],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"guardrails.py has syntax errors:\n{result.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# Guardrails Tests
+# ---------------------------------------------------------------------------
+
+from grokswarm.guardrails import (
+    PlanGate, GoalVerifier, LoopDetector, EvidenceTracker, ToolFilter,
+    _extract_files_from_plan, notify, drain_notifications,
+)
+from grokswarm.models import AgentInfo, AgentState, SubTask, TaskDAG
+
+
+class TestPlanGate:
+    def _make_agent(self, phase="planning"):
+        agent = AgentInfo(name="test", expert="coder")
+        agent.phase = phase
+        return agent
+
+    def test_blocks_write_tools_during_planning(self):
+        agent = self._make_agent("planning")
+        assert PlanGate.check_tool_allowed(agent, "write_file") is not None
+        assert PlanGate.check_tool_allowed(agent, "edit_file") is not None
+        assert PlanGate.check_tool_allowed(agent, "run_shell") is not None
+        assert PlanGate.check_tool_allowed(agent, "git_commit") is not None
+
+    def test_allows_read_tools_during_planning(self):
+        agent = self._make_agent("planning")
+        assert PlanGate.check_tool_allowed(agent, "read_file") is None
+        assert PlanGate.check_tool_allowed(agent, "list_directory") is None
+        assert PlanGate.check_tool_allowed(agent, "grep_files") is None
+        assert PlanGate.check_tool_allowed(agent, "update_plan") is None
+
+    def test_allows_all_during_executing(self):
+        agent = self._make_agent("executing")
+        assert PlanGate.check_tool_allowed(agent, "write_file") is None
+        assert PlanGate.check_tool_allowed(agent, "edit_file") is None
+        assert PlanGate.check_tool_allowed(agent, "run_shell") is None
+
+    def test_check_plan_ready_requires_two_steps(self):
+        agent = self._make_agent()
+        agent.plan = []
+        assert not PlanGate.check_plan_ready(agent)
+        agent.plan = [{"step": "a", "status": "pending"}]
+        assert not PlanGate.check_plan_ready(agent)
+        agent.plan = [{"step": "a", "status": "pending"}, {"step": "b", "status": "pending"}]
+        assert PlanGate.check_plan_ready(agent)
+
+    def test_transition_to_executing(self):
+        agent = self._make_agent("planning")
+        agent.plan = [{"step": "Read foo.py", "status": "pending"}, {"step": "Edit foo.py", "status": "pending"}]
+        PlanGate.transition_to_executing(agent)
+        assert agent.phase == "executing"
+        assert agent.approved_plan is not None
+        assert len(agent.approved_plan) == 2
+        assert "foo.py" in agent.plan_files_allowed
+
+    def test_plan_deviation_warns(self):
+        agent = self._make_agent("executing")
+        agent.plan_files_allowed = {"foo.py"}
+        assert PlanGate.check_plan_deviation(agent, "edit_file", {"path": "foo.py"}) is None
+        assert PlanGate.check_plan_deviation(agent, "edit_file", {"path": "bar.py"}) is not None
+        assert PlanGate.check_plan_deviation(agent, "read_file", {"path": "bar.py"}) is None
+
+
+class TestLoopDetector:
+    def test_detects_same_file_edited_4_times(self):
+        ld = LoopDetector()
+        for _ in range(4):
+            ld.record_tool_call("edit_file", {"path": "foo.py"}, "ok")
+        assert ld.check_loop() is not None
+        assert "LOOP DETECTED" in ld.check_loop()
+
+    def test_no_false_positive_under_threshold(self):
+        ld = LoopDetector()
+        for _ in range(3):
+            ld.record_tool_call("edit_file", {"path": "foo.py"}, "ok")
+        assert ld.check_loop() is None
+
+    def test_detects_same_test_error_3_times(self):
+        ld = LoopDetector()
+        for _ in range(3):
+            ld.record_tool_call("run_tests", {"command": "pytest"}, "blah\n[FAIL] AssertionError: x != y")
+        result = ld.check_loop()
+        assert result is not None
+        assert "same test error" in result
+
+    def test_detects_repeated_sequence(self):
+        ld = LoopDetector()
+        seq = [
+            ("read_file", {"path": "a.py"}, "ok"),
+            ("edit_file", {"path": "a.py"}, "ok"),
+            ("run_tests", {"command": "pytest"}, "ok"),
+        ]
+        # Repeat the same sequence twice
+        for tool, args, res in seq:
+            ld.record_tool_call(tool, args, res)
+        for tool, args, res in seq:
+            ld.record_tool_call(tool, args, res)
+        assert ld.check_loop() is not None
+
+    def test_different_files_no_loop(self):
+        ld = LoopDetector()
+        ld.record_tool_call("edit_file", {"path": "a.py"}, "ok")
+        ld.record_tool_call("edit_file", {"path": "b.py"}, "ok")
+        ld.record_tool_call("edit_file", {"path": "c.py"}, "ok")
+        ld.record_tool_call("edit_file", {"path": "d.py"}, "ok")
+        assert ld.check_loop() is None
+
+
+class TestGoalVerifier:
+    def test_build_reflection_prompt(self):
+        prompt = GoalVerifier.build_reflection_prompt("Fix the login bug")
+        assert "Fix the login bug" in prompt
+        assert "ORIGINAL GOAL" in prompt
+
+    def test_validate_completion_all_done(self):
+        agent = AgentInfo(name="test", expert="coder")
+        agent.plan = [
+            {"step": "Read code", "status": "done"},
+            {"step": "Fix bug", "status": "done"},
+        ]
+        result = GoalVerifier.validate_completion(
+            agent, ["read_file", "edit_file", "run_tests"], ""
+        )
+        assert result["valid"] is True
+        assert len(result["issues"]) == 0
+
+    def test_validate_completion_incomplete_plan(self):
+        agent = AgentInfo(name="test", expert="coder")
+        agent.plan = [
+            {"step": "Read code", "status": "done"},
+            {"step": "Fix bug", "status": "pending"},
+        ]
+        result = GoalVerifier.validate_completion(agent, [], "")
+        assert result["valid"] is False
+        assert any("not marked done" in i for i in result["issues"])
+
+    def test_validate_completion_no_tests_after_mutations(self):
+        agent = AgentInfo(name="test", expert="coder")
+        agent.plan = [{"step": "Fix bug", "status": "done"}]
+        result = GoalVerifier.validate_completion(
+            agent, ["edit_file -> foo.py"], ""
+        )
+        assert result["valid"] is False
+        assert any("tests were never run" in i for i in result["issues"])
+
+
+class TestEvidenceTracker:
+    def test_record_and_summary(self):
+        et = EvidenceTracker()
+        et.record_tool(1, "read_file", {"path": "foo.py"}, "content")
+        et.record_tool(2, "edit_file", {"path": "foo.py"}, "ok")
+        et.record_tool(3, "run_tests", {}, "[PASS] 5 tests passed")
+        summary = et.get_evidence_summary()
+        assert summary["files_read"] == 1
+        assert summary["files_written"] == 1
+        assert summary["test_runs"] == 1
+        assert summary["last_test_status"] == "PASS"
+
+    def test_stale_reads(self):
+        et = EvidenceTracker()
+        et.record_tool(1, "read_file", {"path": "foo.py"}, "content")
+        et.record_tool(2, "edit_file", {"path": "foo.py"}, "ok")
+        warnings = et.check_stale_reads()
+        assert len(warnings) == 1
+        assert "foo.py" in warnings[0]
+
+    def test_no_stale_warning_when_re_read(self):
+        et = EvidenceTracker()
+        et.record_tool(1, "read_file", {"path": "foo.py"}, "content")
+        et.record_tool(2, "edit_file", {"path": "foo.py"}, "ok")
+        et.record_tool(3, "read_file", {"path": "foo.py"}, "new content")
+        warnings = et.check_stale_reads()
+        assert len(warnings) == 0
+
+
+class TestToolFilter:
+    def test_get_tools_for_expert_with_whitelist(self):
+        expert = {"tools": ["read_file", "write_file"], "name": "test"}
+        result = ToolFilter.get_tools_for_expert(expert)
+        assert result == {"read_file", "write_file"}
+
+    def test_get_tools_for_expert_no_whitelist(self):
+        expert = {"name": "test"}
+        result = ToolFilter.get_tools_for_expert(expert)
+        assert result is None  # None = all tools
+
+    def test_model_routing_planning(self):
+        expert = {"model_preference": "reasoning"}
+        model = ToolFilter.get_model_for_phase(expert, "planning")
+        assert model == "grok-3-fast"
+
+    def test_model_routing_executing(self):
+        expert = {"model_preference": "fast"}
+        model = ToolFilter.get_model_for_phase(expert, "executing")
+        assert model == "grok-3-fast"
+
+    def test_model_routing_default(self):
+        expert = {}
+        model = ToolFilter.get_model_for_phase(expert, "executing")
+        assert model == _shared.MODEL
+
+
+class TestExtractFilesFromPlan:
+    def test_extracts_python_files(self):
+        plan = [
+            {"step": "Read app.py to understand layout", "status": "pending"},
+            {"step": "Edit grokswarm/agents.py to fix bug", "status": "pending"},
+        ]
+        files = _extract_files_from_plan(plan)
+        assert "app.py" in files
+        assert "grokswarm/agents.py" in files
+
+    def test_extracts_multiple_extensions(self):
+        plan = [{"step": "Modify config.json and styles.css", "status": "pending"}]
+        files = _extract_files_from_plan(plan)
+        assert "config.json" in files
+        assert "styles.css" in files
+
+
+class TestTaskDAG:
+    def test_ready_tasks(self):
+        dag = TaskDAG(goal="test", subtasks=[
+            SubTask(id="t1", description="first", expert="coder"),
+            SubTask(id="t2", description="second", expert="coder", depends_on=["t1"]),
+        ])
+        ready = dag.ready_tasks()
+        assert len(ready) == 1
+        assert ready[0].id == "t1"
+
+    def test_ready_after_dependency_done(self):
+        dag = TaskDAG(goal="test", subtasks=[
+            SubTask(id="t1", description="first", expert="coder", status="done"),
+            SubTask(id="t2", description="second", expert="coder", depends_on=["t1"]),
+        ])
+        ready = dag.ready_tasks()
+        assert len(ready) == 1
+        assert ready[0].id == "t2"
+
+    def test_is_complete(self):
+        dag = TaskDAG(goal="test", subtasks=[
+            SubTask(id="t1", description="first", expert="coder", status="done"),
+            SubTask(id="t2", description="second", expert="coder", status="skipped"),
+        ])
+        assert dag.is_complete()
+
+    def test_failed_tasks(self):
+        dag = TaskDAG(goal="test", subtasks=[
+            SubTask(id="t1", description="first", expert="coder", status="done"),
+            SubTask(id="t2", description="second", expert="coder", status="failed"),
+        ])
+        failed = dag.failed_tasks()
+        assert len(failed) == 1
+        assert failed[0].id == "t2"
+
+
+class TestNotifications:
+    def test_notify_and_drain(self):
+        # Drain any existing notifications first
+        drain_notifications()
+        notify("test message", level="info")
+        notify("warning msg", level="warning")
+        items = drain_notifications()
+        assert len(items) == 2
+        assert items[0] == ("info", "test message")
+        assert items[1] == ("warning", "warning msg")
+        # Second drain should be empty
+        assert len(drain_notifications()) == 0
+
+
+class TestGetAgentToolSchemas:
+    def test_returns_all_tools_without_filter(self):
+        from grokswarm.tools_registry import get_agent_tool_schemas
+        schemas = get_agent_tool_schemas()
+        names = {s["function"]["name"] for s in schemas}
+        assert "read_file" in names
+        assert "write_file" in names
+        assert "update_plan" in names
+        assert "spawn_agent" not in names  # excluded for agents
+
+    def test_filters_to_allowed_set(self):
+        from grokswarm.tools_registry import get_agent_tool_schemas
+        schemas = get_agent_tool_schemas(allowed_tools={"read_file", "list_directory"})
+        names = {s["function"]["name"] for s in schemas}
+        assert "read_file" in names
+        assert "list_directory" in names
+        assert "update_plan" in names  # always included
+        assert "write_file" not in names
+        assert "edit_file" not in names
