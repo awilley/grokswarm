@@ -154,7 +154,10 @@ def _extract_cached_tokens(usage) -> int:
     if usage is None:
         return 0
     # xAI API returns cached_prompt_text_tokens
-    return getattr(usage, 'cached_prompt_text_tokens', 0) or 0
+    val = getattr(usage, 'cached_prompt_text_tokens', None)
+    if isinstance(val, int):
+        return val
+    return 0
 
 
 def _record_usage(model: str, prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0):
