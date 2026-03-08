@@ -795,7 +795,6 @@ PLANNING (MANDATORY):
         agent.transition(AgentState.DONE)
 
         # Completion notification
-        files_changed = len(ev_summary.get("files_written", 0) if isinstance(ev_summary.get("files_written"), int) else 0)
         test_status = ev_summary.get("last_test_status", "never_run")
         notify(f"[{display_name}] DONE -- {ev_summary.get('files_written', 0)} files changed, tests {test_status}, ${agent.cost_usd:.4f}, {rounds_used} rounds")
 
