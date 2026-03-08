@@ -1297,12 +1297,25 @@ class TestRunExpert:
         return experts_dir
 
     def test_expert_calls_tools(self, tmp_path):
-        """run_expert should pass TOOL_SCHEMAS to the API and execute tool calls."""
+        """run_expert should pass TOOL_SCHEMAS to the API and execute tool calls.
+        With guardrails, the flow is: update_plan -> transition -> write_file -> final."""
         experts_dir = self._make_expert_yaml(tmp_path)
         old_dir = _shared.EXPERTS_DIR
         _shared.EXPERTS_DIR = experts_dir
 
-        # Build mock responses: first response has a tool call, second has final text
+        # Round 1: update_plan (allowed in planning phase, triggers transition to executing)
+        plan_msg = MagicMock()
+        plan_msg.content = "Let me plan first."
+        tc_plan = MagicMock()
+        tc_plan.id = "call_plan"
+        tc_plan.function.name = "update_plan"
+        tc_plan.function.arguments = json.dumps({"steps": [
+            {"step": "Create file", "status": "pending"},
+            {"step": "Verify it", "status": "pending"},
+        ]})
+        plan_msg.tool_calls = [tc_plan]
+
+        # Round 2: write_file (now allowed since we transitioned to executing)
         tool_call_msg = MagicMock()
         tool_call_msg.content = "Let me create that file."
         tc = MagicMock()
@@ -1311,25 +1324,34 @@ class TestRunExpert:
         tc.function.arguments = json.dumps({"path": str(tmp_path / "out.txt"), "content": "hello"})
         tool_call_msg.tool_calls = [tc]
 
+        # Round 3: final text
         final_msg = MagicMock()
         final_msg.content = "Done! File created."
         final_msg.tool_calls = None
 
         resp1 = MagicMock()
-        resp1.choices = [MagicMock(message=tool_call_msg)]
+        resp1.choices = [MagicMock(message=plan_msg)]
         resp1.usage = MagicMock(prompt_tokens=100, completion_tokens=50)
 
         resp2 = MagicMock()
-        resp2.choices = [MagicMock(message=final_msg)]
-        resp2.usage = MagicMock(prompt_tokens=200, completion_tokens=100)
+        resp2.choices = [MagicMock(message=tool_call_msg)]
+        resp2.usage = MagicMock(prompt_tokens=100, completion_tokens=50)
+
+        resp3 = MagicMock()
+        resp3.choices = [MagicMock(message=final_msg)]
+        resp3.usage = MagicMock(prompt_tokens=200, completion_tokens=100)
 
         call_count = 0
         async def mock_create(**kwargs):
             nonlocal call_count
             call_count += 1
-            # Verify tools are passed
             assert "tools" in kwargs, "TOOL_SCHEMAS must be passed to API"
-            return resp1 if call_count == 1 else resp2
+            if call_count == 1:
+                return resp1
+            elif call_count == 2:
+                return resp2
+            else:
+                return resp3
 
         mock_client = MagicMock()
         mock_client.chat.completions.create = mock_create
@@ -1346,7 +1368,7 @@ class TestRunExpert:
             result = asyncio.run(_main.run_expert("coder", "Create a file", agent_name="test-coder"))
 
         assert "Done! File created." in result
-        assert call_count == 3, "Should make 3 API calls (tool call + verification gate + final)"
+        assert "update_plan" in executed_tools
         assert "write_file" in executed_tools
         _shared.EXPERTS_DIR = old_dir
         _main.state.agents.pop("test-coder", None)
