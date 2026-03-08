@@ -44,11 +44,16 @@ class AgentInfo:
             return False
         return True
 
-    def add_usage(self, prompt_tokens: int, completion_tokens: int, model: str | None = None):
+    def add_usage(self, prompt_tokens: int, completion_tokens: int, model: str | None = None, cached_tokens: int = 0):
         from grokswarm.shared import _get_pricing, MODEL
-        inp_rate, out_rate = _get_pricing(model or MODEL)
+        inp_rate, cached_rate, out_rate = _get_pricing(model or MODEL)
         self.tokens_used += prompt_tokens + completion_tokens
-        self.cost_usd += (prompt_tokens / 1_000_000.0) * inp_rate + (completion_tokens / 1_000_000.0) * out_rate
+        non_cached = max(0, prompt_tokens - cached_tokens)
+        self.cost_usd += (
+            (non_cached / 1_000_000.0) * inp_rate
+            + (cached_tokens / 1_000_000.0) * cached_rate
+            + (completion_tokens / 1_000_000.0) * out_rate
+        )
 
 
 @dataclass
@@ -71,6 +76,7 @@ class SwarmState:
     global_cost_usd: float = 0.0
     project_prompt_tokens: int = 0
     project_completion_tokens: int = 0
+    project_cached_tokens: int = 0
     project_cost_usd: float = 0.0
 
     def reset_project_state(self):

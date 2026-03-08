@@ -114,8 +114,9 @@ async def _compact_conversation(conversation: list) -> list:
             label="Compaction"
         )
         if hasattr(summary_response, 'usage') and summary_response.usage:
-            from grokswarm.agents import _record_usage
-            _record_usage(shared.MODEL, summary_response.usage.prompt_tokens, summary_response.usage.completion_tokens)
+            from grokswarm.agents import _record_usage, _extract_cached_tokens
+            _record_usage(shared.MODEL, summary_response.usage.prompt_tokens, summary_response.usage.completion_tokens,
+                          _extract_cached_tokens(summary_response.usage))
         summary = summary_response.choices[0].message.content.strip()
     except Exception:
         return system + others[-MAX_CONVERSATION_MESSAGES:]
@@ -516,9 +517,10 @@ async def _stream_with_tools(conversation: list) -> str:
         if round_usage:
             pt = getattr(round_usage, 'prompt_tokens', 0) or 0
             ct = getattr(round_usage, 'completion_tokens', 0) or 0
+            cached = _extract_cached_tokens(round_usage)
             total_prompt_tokens += pt
             total_completion_tokens += ct
-            _record_usage(shared.MODEL, pt, ct)
+            _record_usage(shared.MODEL, pt, ct, cached)
 
         if finish_reason == "length":
             shared.console.print("  [swarm.warning]\u26a0 Response was truncated (token limit). Output may be incomplete.[/swarm.warning]")

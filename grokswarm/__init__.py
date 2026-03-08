@@ -111,7 +111,7 @@ from grokswarm.engine import (
 # -- agents --
 from grokswarm.agents import (
     SwarmBus, get_bus,
-    _costs_file, _load_project_costs, _save_project_costs, _record_usage,
+    _costs_file, _load_project_costs, _save_project_costs, _record_usage, _extract_cached_tokens,
     EXPERT_DEFAULT_MAX_ROUNDS, _auto_checkpoint_before_agent,
     _detect_tech_stack, _build_completion_report,
     run_supervisor, run_expert,

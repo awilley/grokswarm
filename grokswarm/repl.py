@@ -996,14 +996,31 @@ async def _chat_async(session_name: str | None = None):
                         shared.console.print("[swarm.accent]Session Metrics[/swarm.accent]")
                         shared.console.print(f"  [bold]Prompt Tokens:[/bold]     {metrics['prompt_tokens']:,}")
                         shared.console.print(f"  [bold]Completion Tokens:[/bold] {metrics['completion_tokens']:,}")
+                        shared.console.print(f"  [bold]Cached Tokens:[/bold]     {metrics.get('cached_tokens', 0):,}")
                         shared.console.print(f"  [bold]Total Tokens:[/bold]      {metrics['total_tokens']:,}")
+                        # Cache ratio
+                        s_cached = metrics.get('cached_tokens', 0)
+                        s_prompt = metrics['prompt_tokens']
+                        if s_prompt > 0 and s_cached > 0:
+                            cache_pct = (s_cached / s_prompt) * 100
+                            shared.console.print(f"  [bold]Cache Hit Rate:[/bold]   {cache_pct:.1f}%")
                         shared.console.print()
                         shared.console.print("[swarm.accent]Project Totals (all sessions)[/swarm.accent]")
                         ptot = shared.state.project_prompt_tokens + shared.state.project_completion_tokens
                         shared.console.print(f"  [bold]Prompt Tokens:[/bold]     {shared.state.project_prompt_tokens:,}")
                         shared.console.print(f"  [bold]Completion Tokens:[/bold] {shared.state.project_completion_tokens:,}")
+                        shared.console.print(f"  [bold]Cached Tokens:[/bold]     {shared.state.project_cached_tokens:,}")
                         shared.console.print(f"  [bold]Total Tokens:[/bold]      {ptot:,}")
                         shared.console.print(f"  [bold]Total Cost:[/bold]        ${shared.state.project_cost_usd:.4f}")
+                        # Show estimated savings from caching
+                        p_cached = shared.state.project_cached_tokens
+                        if p_cached > 0:
+                            # Savings = cached_tokens * (full_rate - cached_rate) / 1M
+                            # Using default rates as approximation
+                            savings = (p_cached / 1_000_000.0) * (0.20 - 0.05)
+                            shared.console.print(f"  [bold green]Cache Savings:[/bold green]   ~${savings:.4f}")
+                            cache_pct = (p_cached / shared.state.project_prompt_tokens) * 100 if shared.state.project_prompt_tokens > 0 else 0
+                            shared.console.print(f"  [bold]Cache Hit Rate:[/bold]   {cache_pct:.1f}%")
                         shared.console.print()
                     elif cmd == "watch":
                         await _watch_agents(auto_exit=False)

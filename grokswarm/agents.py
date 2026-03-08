@@ -47,9 +47,15 @@ class SwarmBus:
             "  model TEXT NOT NULL,"
             "  prompt_tokens INTEGER NOT NULL,"
             "  completion_tokens INTEGER NOT NULL,"
-            "  total_tokens INTEGER NOT NULL"
+            "  total_tokens INTEGER NOT NULL,"
+            "  cached_tokens INTEGER NOT NULL DEFAULT 0"
             ")"
         )
+        # Migrate: add cached_tokens column if missing (existing DBs)
+        try:
+            self.conn.execute("SELECT cached_tokens FROM metrics LIMIT 1")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE metrics ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0")
         self.conn.commit()
 
     def clear(self):
@@ -82,22 +88,23 @@ class SwarmBus:
         lines = [f"[{m['sender']}\u2192{m['recipient']}] {m['body'][:300]}" for m in msgs if m['kind'] == 'result']
         return "\n".join(lines)
 
-    def log_usage(self, model: str, prompt_tokens: int, completion_tokens: int):
+    def log_usage(self, model: str, prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0):
         self.conn.execute(
-            "INSERT INTO metrics (model, prompt_tokens, completion_tokens, total_tokens) VALUES (?, ?, ?, ?)",
-            (model, prompt_tokens, completion_tokens, prompt_tokens + completion_tokens),
+            "INSERT INTO metrics (model, prompt_tokens, completion_tokens, total_tokens, cached_tokens) VALUES (?, ?, ?, ?, ?)",
+            (model, prompt_tokens, completion_tokens, prompt_tokens + completion_tokens, cached_tokens),
         )
         self.conn.commit()
 
     def get_metrics(self) -> dict:
         cur = self.conn.execute(
-            "SELECT SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens) FROM metrics"
+            "SELECT SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens), SUM(cached_tokens) FROM metrics"
         )
         row = cur.fetchone()
         return {
             "prompt_tokens": row[0] or 0,
             "completion_tokens": row[1] or 0,
             "total_tokens": row[2] or 0,
+            "cached_tokens": row[3] or 0,
         }
 
     def check_abort(self) -> bool:
@@ -121,6 +128,7 @@ def _load_project_costs():
             data = json.loads(f.read_text(encoding="utf-8"))
             shared.state.project_prompt_tokens = data.get("prompt_tokens", 0)
             shared.state.project_completion_tokens = data.get("completion_tokens", 0)
+            shared.state.project_cached_tokens = data.get("cached_tokens", 0)
             shared.state.project_cost_usd = data.get("cost_usd", 0.0)
         except (json.JSONDecodeError, KeyError, OSError):
             pass
@@ -132,6 +140,7 @@ def _save_project_costs():
     data = {
         "prompt_tokens": shared.state.project_prompt_tokens,
         "completion_tokens": shared.state.project_completion_tokens,
+        "cached_tokens": shared.state.project_cached_tokens,
         "cost_usd": round(shared.state.project_cost_usd, 6),
         "last_updated": datetime.now().isoformat(),
     }
@@ -140,12 +149,27 @@ def _save_project_costs():
     tmp.replace(f)
 
 
-def _record_usage(model: str, prompt_tokens: int, completion_tokens: int):
-    get_bus().log_usage(model, prompt_tokens, completion_tokens)
-    inp_rate, out_rate = shared._get_pricing(model)
+def _extract_cached_tokens(usage) -> int:
+    """Extract cached_prompt_text_tokens from API response usage object."""
+    if usage is None:
+        return 0
+    # xAI API returns cached_prompt_text_tokens
+    return getattr(usage, 'cached_prompt_text_tokens', 0) or 0
+
+
+def _record_usage(model: str, prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0):
+    get_bus().log_usage(model, prompt_tokens, completion_tokens, cached_tokens)
+    inp_rate, cached_rate, out_rate = shared._get_pricing(model)
     shared.state.project_prompt_tokens += prompt_tokens
     shared.state.project_completion_tokens += completion_tokens
-    shared.state.project_cost_usd += (prompt_tokens / 1_000_000.0) * inp_rate + (completion_tokens / 1_000_000.0) * out_rate
+    shared.state.project_cached_tokens += cached_tokens
+    # Cached tokens are charged at the lower cached rate
+    non_cached = max(0, prompt_tokens - cached_tokens)
+    shared.state.project_cost_usd += (
+        (non_cached / 1_000_000.0) * inp_rate
+        + (cached_tokens / 1_000_000.0) * cached_rate
+        + (completion_tokens / 1_000_000.0) * out_rate
+    )
     try:
         _save_project_costs()
     except OSError:
@@ -183,7 +207,8 @@ Respond ONLY with valid JSON: {{"experts": ["assistant", "researcher"], "team_na
             label="Supervisor"
         )
         if hasattr(response, 'usage') and response.usage:
-            _record_usage(shared.MODEL, response.usage.prompt_tokens, response.usage.completion_tokens)
+            _record_usage(shared.MODEL, response.usage.prompt_tokens, response.usage.completion_tokens,
+                          _extract_cached_tokens(response.usage))
         plan = json.loads(response.choices[0].message.content.strip())
         shared.console.print(f"[bold cyan]Plan:[/bold cyan] {plan}")
         return plan
@@ -527,11 +552,17 @@ PLANNING (MANDATORY):
             if hasattr(response, 'usage') and response.usage:
                 pt = response.usage.prompt_tokens or 0
                 ct = response.usage.completion_tokens or 0
-                _record_usage(round_model, pt, ct)
-                agent.add_usage(pt, ct, round_model)
+                cached = _extract_cached_tokens(response.usage)
+                _record_usage(round_model, pt, ct, cached)
+                agent.add_usage(pt, ct, round_model, cached)
                 shared.state.global_tokens_used += pt + ct
-                _inp_r, _out_r = shared._get_pricing(round_model)
-                shared.state.global_cost_usd += (pt / 1_000_000.0) * _inp_r + (ct / 1_000_000.0) * _out_r
+                _inp_r, _cached_r, _out_r = shared._get_pricing(round_model)
+                non_cached = max(0, pt - cached)
+                shared.state.global_cost_usd += (
+                    (non_cached / 1_000_000.0) * _inp_r
+                    + (cached / 1_000_000.0) * _cached_r
+                    + (ct / 1_000_000.0) * _out_r
+                )
 
             if not agent.check_budget():
                 agent.transition(AgentState.PAUSED)
@@ -762,8 +793,9 @@ PLANNING (MANDATORY):
                 if hasattr(response, 'usage') and response.usage:
                     pt = response.usage.prompt_tokens or 0
                     ct = response.usage.completion_tokens or 0
-                    _record_usage(execution_model, pt, ct)
-                    agent.add_usage(pt, ct, execution_model)
+                    cached = _extract_cached_tokens(response.usage)
+                    _record_usage(execution_model, pt, ct, cached)
+                    agent.add_usage(pt, ct, execution_model, cached)
                 choice = response.choices[0]
                 msg = choice.message
                 if msg.content:

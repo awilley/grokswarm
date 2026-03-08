@@ -292,8 +292,9 @@ RULES:
                 label="Orchestrator:decompose"
             )
             if hasattr(response, 'usage') and response.usage:
-                from grokswarm.agents import _record_usage
-                _record_usage(decompose_model, response.usage.prompt_tokens, response.usage.completion_tokens)
+                from grokswarm.agents import _record_usage, _extract_cached_tokens
+                _record_usage(decompose_model, response.usage.prompt_tokens, response.usage.completion_tokens,
+                              _extract_cached_tokens(response.usage))
 
             data = json.loads(response.choices[0].message.content.strip())
             subtasks = []
