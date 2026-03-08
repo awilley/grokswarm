@@ -85,16 +85,24 @@ BASE_URL = "https://api.x.ai/v1"
 MAX_TOKENS = 16384
 CODE_MODEL: str | None = None
 
-# -- Pricing --
+# -- Pricing (per 1M tokens: input, output) --
 MODEL_PRICING: dict[str, tuple[float, float]] = {
-    "grok-4-1-fast":            (0.20,  0.50),
-    "grok-4":                   (2.00,  8.00),
-    "grok-3":                   (3.00, 15.00),
-    "grok-3-fast":              (0.60,  3.00),
-    "grok-3-mini":              (0.30,  0.50),
-    "grok-2":                   (2.00, 10.00),
-    "grok-code-fast-1":         (0.20,  1.50),
-    "grok-4-1-fast-reasoning":  (0.20,  0.50),
+    # Tier 1: Fast (non-reasoning) — exploration, simple tool calls
+    "grok-4-1-fast-non-reasoning": (0.20,  0.50),
+    # Tier 2: Reasoning — standard agent execution
+    "grok-4-1-fast-reasoning":     (0.20,  0.50),
+    "grok-4-1-fast":               (0.20,  0.50),
+    # Tier 3: Hardcore — complex planning, decomposition
+    "grok-4.20":                   (3.00, 15.00),
+    # Tier 4: Multi-agent — orchestrator decomposition
+    "grok-4.20-multi-agent":       (3.00, 15.00),
+    # Legacy / other
+    "grok-4":                      (2.00,  8.00),
+    "grok-3":                      (3.00, 15.00),
+    "grok-3-fast":                 (0.60,  3.00),
+    "grok-3-mini":                 (0.30,  0.50),
+    "grok-2":                      (2.00, 10.00),
+    "grok-code-fast-1":            (0.20,  1.50),
 }
 _DEFAULT_PRICING = (0.20, 0.50)
 

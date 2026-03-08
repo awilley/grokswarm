@@ -309,6 +309,10 @@ def _build_completion_report(display_name: str, tool_actions: list[str], rounds_
         lines.append(f"Evidence: {evidence_summary.get('files_read', 0)} files read, "
                       f"{evidence_summary.get('test_runs', 0)} test runs, "
                       f"last test: {evidence_summary.get('last_test_status', 'never_run')}")
+        models = evidence_summary.get("models_used", {})
+        if models:
+            models_str = ", ".join(f"{m}: {c} rounds" for m, c in models.items())
+            lines.append(f"Models used: {models_str}")
     # Verification issues
     if verification_issues:
         lines.append(f"Verification issues: {'; '.join(verification_issues)}")
@@ -430,14 +434,18 @@ PLANNING (MANDATORY):
     loop_detector = LoopDetector()
     evidence_tracker = EvidenceTracker()
     loop_escalation_count = 0
+    model_escalated = False  # True when loop detector escalated to hardcore model
 
     # Tool filtering based on expert YAML
     allowed_tools = ToolFilter.get_tools_for_expert(data)
     agent_tools = get_agent_tool_schemas(allowed_tools=allowed_tools)
 
-    # Model routing per phase
+    # Model routing per phase (4-tier system)
+    # Planning: hardcore model (reasoning matters most when forming a plan)
+    # Execution: expert's preferred tier (default: reasoning)
     planning_model = ToolFilter.get_model_for_phase(data, "planning")
     execution_model = ToolFilter.get_model_for_phase(data, "executing")
+    escalation_model = ToolFilter.get_model_for_escalation()
 
     shared.state.agent_mode += 1
     try:
@@ -461,15 +469,17 @@ PLANNING (MANDATORY):
 
             agent.transition(AgentState.THINKING)
 
-            # -- Goal anchoring at midpoint --
-            if _round == max_rounds // 2:
+            # -- Goal anchoring: inject at 40% and 70% of max_rounds --
+            pct = (_round + 1) / max_rounds
+            if _round > 0 and abs(pct - 0.4) < (1.0 / max_rounds):
                 conversation.append({
                     "role": "user",
                     "content": f'[SYSTEM] Checkpoint -- original goal: "{task_desc[:200]}". Are you on track? If not, adjust your plan.',
                 })
 
-            # -- Reflection prompt 2 rounds before end --
-            if _round == max_rounds - 2 and _round > 0:
+            # -- Reflection prompt at ~80% of max_rounds (gives agent 20% remaining to act) --
+            reflection_round = int(max_rounds * 0.8)
+            if _round == reflection_round and _round > 2:
                 conversation.append({
                     "role": "user",
                     "content": GoalVerifier.build_reflection_prompt(task_desc),
@@ -491,8 +501,16 @@ PLANNING (MANDATORY):
                         "content": "[SYSTEM] " + " ".join(stale_warnings),
                     })
 
-            # Select model based on phase
-            round_model = planning_model if agent.phase == "planning" else execution_model
+            # Select model based on phase + escalation state
+            if model_escalated:
+                round_model = escalation_model  # loop detector escalated to hardcore
+            elif agent.phase == "planning":
+                round_model = planning_model    # hardcore for planning
+            else:
+                round_model = execution_model   # expert's preferred tier
+
+            # Track which model is used this round
+            evidence_tracker.record_model(round_model)
 
             _api_kwargs = dict(
                 model=round_model,
@@ -504,7 +522,7 @@ PLANNING (MANDATORY):
                 _api_kwargs["temperature"] = float(expert_temperature)
             response = await shared._api_call_with_retry(
                 lambda: shared.client.chat.completions.create(**_api_kwargs),
-                label=f"Expert:{data['name']}"
+                label=f"Expert:{data['name']}({round_model})"
             )
             if hasattr(response, 'usage') and response.usage:
                 pt = response.usage.prompt_tokens or 0
@@ -664,14 +682,14 @@ PLANNING (MANDATORY):
                                 notify(f"[{display_name}] Plan approved -- executing ({len(agent.plan)} steps)")
                                 shared._log(f"agent {display_name}: auto-transitioned to executing phase")
                             else:
-                                # Post plan for user approval
+                                # Post plan for user review and auto-approve
+                                # The user can still /reject to revert and send feedback
                                 plan_text = "\n".join(f"  {i+1}. {s['step']}" for i, s in enumerate(agent.plan))
                                 if bus:
-                                    bus.post(display_name, f"Plan ready for approval:\n{plan_text}", kind="plan")
-                                shared.console.print(f"[bold yellow][{display_name}] Plan ready -- use /approve {display_name} or /reject {display_name} <feedback>[/bold yellow]")
-                                # Auto-approve for now (user can /reject to revert)
+                                    bus.post(display_name, f"Plan ready:\n{plan_text}", kind="plan")
+                                notify(f"[{display_name}] Plan: {len(agent.plan)} steps -- /reject {display_name} <feedback> to revise")
                                 PlanGate.transition_to_executing(agent)
-                                notify(f"[{display_name}] Plan approved -- executing ({len(agent.plan)} steps)")
+                                shared._log(f"agent {display_name}: plan posted, auto-transitioned to executing")
 
             agent.current_tool = None
 
@@ -683,19 +701,29 @@ PLANNING (MANDATORY):
                 notify(f"WARNING: {display_name} stuck in loop -- use /tell or /peek", level="warning")
                 shared.console.print(f"[bold yellow]WARNING: {display_name} loop detected (escalation #{loop_escalation_count})[/bold yellow]")
 
-                if loop_escalation_count >= 2:
-                    # Pause agent after 2 loop escalations
+                if loop_escalation_count >= 3:
+                    # Pause agent after 3 loop escalations
                     agent.transition(AgentState.PAUSED)
-                    pause_msg = f"Agent {display_name} paused: stuck in loop after 2 escalations. Use /tell {display_name} to provide guidance or /resume {display_name}."
+                    pause_msg = f"Agent {display_name} paused: stuck in loop after 3 escalations. Use /tell {display_name} to provide guidance or /resume {display_name}."
                     if bus:
                         bus.post(display_name, pause_msg, kind="status")
                     notify(pause_msg, level="error")
                     shared.console.print(f"[bold red]{pause_msg}[/bold red]")
                     break
-                else:
+                elif loop_escalation_count == 1:
+                    # First escalation: upgrade model to hardcore for better reasoning
+                    model_escalated = True
+                    shared._log(f"agent {display_name}: escalating to hardcore model after loop detection")
+                    notify(f"[{display_name}] Escalating to hardcore model after loop detection", level="warning")
                     conversation.append({
                         "role": "user",
-                        "content": f"[SYSTEM] {loop_msg}",
+                        "content": f"[SYSTEM] {loop_msg}\n\n[MODEL ESCALATED] You are now running on a more powerful reasoning model. Use this opportunity to think more carefully about the problem.",
+                    })
+                else:
+                    # Second escalation: warn harder
+                    conversation.append({
+                        "role": "user",
+                        "content": f"[SYSTEM] {loop_msg}\n\n[FINAL WARNING] One more loop and you will be paused. Ask for help via send_message if needed.",
                     })
 
             # -- Milestone notifications: plan step completion --
@@ -798,7 +826,8 @@ PLANNING (MANDATORY):
 
         # Completion notification
         test_status = ev_summary.get("last_test_status", "never_run")
-        notify(f"[{display_name}] DONE -- {ev_summary.get('files_written', 0)} files changed, tests {test_status}, ${agent.cost_usd:.4f}, {rounds_used} rounds")
+        models_info = ", ".join(f"{m}x{c}" for m, c in ev_summary.get("models_used", {}).items())
+        notify(f"[{display_name}] DONE -- {ev_summary.get('files_written', 0)} files changed, tests {test_status}, ${agent.cost_usd:.4f}, {rounds_used} rounds, models: {models_info or 'none'}")
 
         return full_output
     except Exception as e:

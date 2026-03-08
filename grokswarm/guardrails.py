@@ -33,8 +33,8 @@ class PlanGate:
 
     @staticmethod
     def check_plan_ready(agent) -> bool:
-        """Returns True if agent has a non-empty plan with at least 2 steps."""
-        return bool(agent.plan) and len(agent.plan) >= 2
+        """Returns True if agent has a non-empty plan. Single-step plans are fine for simple tasks."""
+        return bool(agent.plan) and len(agent.plan) >= 1
 
     @staticmethod
     def transition_to_executing(agent):
@@ -207,6 +207,11 @@ class EvidenceTracker:
         self.test_results: list[tuple[int, str]] = []  # (round, PASS/FAIL)
         self.shell_results: list[tuple[int, str, str]] = []  # (round, cmd, truncated_output)
         self.current_round: int = 0
+        self.models_used: dict[str, int] = {}  # model -> round_count
+
+    def record_model(self, model: str):
+        """Track which model was used for a round."""
+        self.models_used[model] = self.models_used.get(model, 0) + 1
 
     def record_tool(self, round_num: int, tool_name: str, args: dict, result: str):
         self.current_round = round_num
@@ -241,6 +246,7 @@ class EvidenceTracker:
             "test_runs": len(self.test_results),
             "last_test_status": last_test[1] if last_test else "never_run",
             "shell_commands": len(self.shell_results),
+            "models_used": dict(self.models_used),
         }
 
 
@@ -268,14 +274,15 @@ RULES:
 
     @staticmethod
     async def decompose(task: str, experts: list[str]) -> TaskDAG:
-        """Use LLM to decompose task into a TaskDAG."""
+        """Use LLM to decompose task into a TaskDAG. Uses multi-agent model."""
         prompt = Orchestrator.DECOMPOSITION_PROMPT.format(
             experts=experts, task=task
         )
+        decompose_model = ToolFilter.get_orchestrator_model()
         try:
             response = await shared._api_call_with_retry(
                 lambda: shared.client.chat.completions.create(
-                    model=shared.MODEL,
+                    model=decompose_model,
                     messages=[
                         {"role": "system", "content": "You are a task decomposition engine. Output valid JSON only."},
                         {"role": "user", "content": prompt},
@@ -286,7 +293,7 @@ RULES:
             )
             if hasattr(response, 'usage') and response.usage:
                 from grokswarm.agents import _record_usage
-                _record_usage(shared.MODEL, response.usage.prompt_tokens, response.usage.completion_tokens)
+                _record_usage(decompose_model, response.usage.prompt_tokens, response.usage.completion_tokens)
 
             data = json.loads(response.choices[0].message.content.strip())
             subtasks = []
@@ -424,9 +431,16 @@ TASK_TYPE_TOOLS = {
     },
 }
 
+# 4-tier model routing:
+#   fast       — exploration, read-only, simple tool calls (non-reasoning, cheapest)
+#   reasoning  — standard agent execution (default)
+#   hardcore   — complex planning, decomposition, difficult debugging
+#   multi_agent — orchestrator task decomposition
 MODEL_ROUTING = {
-    "fast": "grok-3-fast",
-    "reasoning": None,  # uses configured MODEL
+    "fast":        "grok-4-1-fast-non-reasoning",
+    "reasoning":   "grok-4-1-fast-reasoning",
+    "hardcore":    "grok-4.20-experimental-beta-latest",
+    "multi_agent": "grok-4.20-multi-agent-experimental-beta-latest",
 }
 
 
@@ -441,13 +455,30 @@ class ToolFilter:
 
     @staticmethod
     def get_model_for_phase(expert_yaml: dict, phase: str) -> str:
-        """Returns the appropriate model for the current phase."""
+        """Returns the appropriate model for the current phase.
+
+        Planning uses hardcore model (reasoning matters most when forming a plan).
+        Execution uses the expert's preferred tier (default: reasoning).
+        """
         pref = expert_yaml.get("model_preference", "reasoning")
-        # Planning phase always uses fast model (read-only, cheaper)
         if phase == "planning":
-            return MODEL_ROUTING["fast"] or shared.MODEL
+            # Planning needs strong reasoning — use hardcore for better plans
+            if pref == "fast":
+                # Fast experts still get reasoning for planning (not non-reasoning)
+                return MODEL_ROUTING["reasoning"]
+            return MODEL_ROUTING["hardcore"]
         # Execution uses the expert's preference
-        return MODEL_ROUTING.get(pref) or shared.MODEL
+        return MODEL_ROUTING.get(pref, MODEL_ROUTING["reasoning"])
+
+    @staticmethod
+    def get_model_for_escalation() -> str:
+        """Returns the hardcore model for loop-detector escalation."""
+        return MODEL_ROUTING["hardcore"]
+
+    @staticmethod
+    def get_orchestrator_model() -> str:
+        """Returns the multi-agent model for orchestrator decomposition."""
+        return MODEL_ROUTING["multi_agent"]
 
 
 # ---------------------------------------------------------------------------
