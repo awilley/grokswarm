@@ -1465,6 +1465,56 @@ class TestProjectCosts:
             _shared.PROJECT_DIR = old_dir
 
 
+class TestCachedTokens:
+    def test_extract_cached_tokens_with_value(self):
+        usage = MagicMock()
+        usage.cached_prompt_text_tokens = 500
+        assert _main._extract_cached_tokens(usage) == 500
+
+    def test_extract_cached_tokens_none(self):
+        assert _main._extract_cached_tokens(None) == 0
+
+    def test_extract_cached_tokens_missing_attr(self):
+        """MagicMock auto-creates attrs -- should return 0 for non-int."""
+        usage = MagicMock(spec=[])  # no auto-attr
+        assert _main._extract_cached_tokens(usage) == 0
+
+    def test_pricing_is_3_tuple(self):
+        """All MODEL_PRICING entries should be (input, cached_input, output)."""
+        for model, rates in _shared.MODEL_PRICING.items():
+            assert len(rates) == 3, f"{model} has {len(rates)}-tuple, expected 3"
+            assert rates[1] < rates[0], f"{model} cached rate should be less than input rate"
+
+    def test_get_pricing_returns_3_tuple(self):
+        rates = _shared._get_pricing("grok-4-1-fast-reasoning")
+        assert len(rates) == 3
+        assert rates == (0.20, 0.05, 0.50)
+
+    def test_cached_tokens_reduce_cost(self):
+        """Cost with cached tokens should be less than without."""
+        inp_rate, cached_rate, out_rate = _shared._get_pricing("grok-4-1-fast-reasoning")
+        prompt = 1_000_000
+        completion = 100_000
+        cached = 800_000  # 80% cache hit
+
+        # Full cost (no caching)
+        full_cost = (prompt / 1_000_000.0) * inp_rate + (completion / 1_000_000.0) * out_rate
+
+        # Cost with caching
+        non_cached = prompt - cached
+        cached_cost = (
+            (non_cached / 1_000_000.0) * inp_rate
+            + (cached / 1_000_000.0) * cached_rate
+            + (completion / 1_000_000.0) * out_rate
+        )
+
+        assert cached_cost < full_cost
+        # Should save 75% on the cached portion
+        savings = full_cost - cached_cost
+        expected_savings = (cached / 1_000_000.0) * (inp_rate - cached_rate)
+        assert abs(savings - expected_savings) < 0.0001
+
+
 class TestSyntax:
     def test_main_compiles(self):
         result = subprocess.run(
