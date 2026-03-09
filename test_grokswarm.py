@@ -2177,3 +2177,70 @@ class TestGuardrailPipeline:
         schemas = gp.get_tool_schemas()
         assert isinstance(schemas, list)
         assert len(schemas) > 0
+
+
+# -- Model config (user-configurable model selection) ----------------------
+
+from grokswarm.guardrails import (
+    MODEL_ROUTING, _DEFAULT_MODEL_ROUTING,
+    set_model_tier, get_model_tiers, reset_model_tiers, _VALID_TIERS,
+)
+
+
+class TestModelConfig:
+    def setup_method(self):
+        reset_model_tiers()
+
+    def teardown_method(self):
+        reset_model_tiers()
+
+    def test_set_model_tier_updates_routing(self):
+        set_model_tier("fast", "grok-test-fast")
+        assert MODEL_ROUTING["fast"] == "grok-test-fast"
+
+    def test_set_model_tier_reasoning_updates_shared_model(self):
+        set_model_tier("reasoning", "grok-custom-reasoning")
+        assert MODEL_ROUTING["reasoning"] == "grok-custom-reasoning"
+        assert _shared.MODEL == "grok-custom-reasoning"
+
+    def test_get_model_tiers_returns_all_four(self):
+        tiers = get_model_tiers()
+        assert set(tiers.keys()) == {"fast", "reasoning", "hardcore", "multi_agent"}
+
+    def test_get_model_tiers_returns_copy(self):
+        tiers = get_model_tiers()
+        tiers["fast"] = "mutated"
+        assert MODEL_ROUTING["fast"] != "mutated"
+
+    def test_reset_model_tiers_restores_defaults(self):
+        set_model_tier("fast", "grok-test-fast")
+        set_model_tier("hardcore", "grok-test-hardcore")
+        reset_model_tiers()
+        assert MODEL_ROUTING == dict(_DEFAULT_MODEL_ROUTING)
+        assert _shared.MODEL == _DEFAULT_MODEL_ROUTING["reasoning"]
+
+    def test_invalid_tier_raises_error(self):
+        with pytest.raises(ValueError, match="Invalid tier"):
+            set_model_tier("nonexistent", "grok-nope")
+
+    def test_valid_tiers_constant(self):
+        assert _VALID_TIERS == {"fast", "reasoning", "hardcore", "multi_agent"}
+
+    def test_model_command_in_slash_commands(self):
+        from grokswarm.repl import SwarmCompleter
+        assert "/model" in SwarmCompleter.SLASH_COMMANDS
+
+    def test_pipeline_picks_up_changed_routing(self):
+        from grokswarm.guardrails import GuardrailPipeline, MODEL_ROUTING
+        from grokswarm.models import AgentInfo
+        set_model_tier("reasoning", "grok-custom-reasoning")
+        set_model_tier("hardcore", "grok-custom-hardcore")
+        agent = AgentInfo(name="test-coder", expert="Coder")
+        agent.phase = "executing"
+        expert_data = {"name": "Coder", "mindset": "Clean code", "model_preference": "reasoning"}
+        gp = GuardrailPipeline(agent, "test-coder", "fix a bug", expert_data, bus=None)
+        model = gp.select_model()
+        assert model == "grok-custom-reasoning"
+        agent.phase = "planning"
+        model = gp.select_model()
+        assert model == "grok-custom-hardcore"

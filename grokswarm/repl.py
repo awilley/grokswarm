@@ -40,7 +40,10 @@ from grokswarm.agents import (
     get_bus, run_supervisor, run_expert, _load_project_costs,
     _list_agents_impl,
 )
-from grokswarm.guardrails import PlanGate, Orchestrator, drain_notifications
+from grokswarm.guardrails import (
+    PlanGate, Orchestrator, drain_notifications,
+    get_model_tiers, set_model_tier, reset_model_tiers, _VALID_TIERS,
+)
 
 
 # -- Context-Aware Tab Completion --
@@ -81,6 +84,7 @@ class SwarmCompleter(Completer):
         "/resume": "Resume a paused agent: /resume <name>",
         "/context": "Show project context",
         "/session": "Manage sessions",
+        "/model": "View/set model tiers: /model [tier] [model-name]",
         "/budget": "Set/view session cost limit: /budget [amount]",
         "/approve": "Approve agent plan: /approve <name>",
         "/reject": "Reject agent plan: /reject <name> [feedback]",
@@ -92,6 +96,7 @@ class SwarmCompleter(Completer):
     GIT_SUBCMDS = ["log", "diff", "branch"]
     PATH_COMMANDS = {"read", "edit", "list"}
     PROJECT_SUBCMDS = ["list", "switch"]
+    MODEL_SUBCMDS = ["list", "reset", "fast", "reasoning", "hardcore", "multi_agent"]
 
     def __init__(self):
         self._path_completer = PathCompleter(only_directories=False, expanduser=True,
@@ -126,6 +131,11 @@ class SwarmCompleter(Completer):
         elif cmd == "git":
             if not arg_text.endswith(" "):
                 for sc in self.GIT_SUBCMDS:
+                    if sc.startswith(arg_text.lower()):
+                        yield Completion(sc, start_position=-len(arg_text))
+        elif cmd == "model":
+            if not arg_text.endswith(" "):
+                for sc in self.MODEL_SUBCMDS:
                     if sc.startswith(arg_text.lower()):
                         yield Completion(sc, start_position=-len(arg_text))
         elif cmd == "project":
@@ -795,7 +805,7 @@ async def _chat_async(session_name: str | None = None):
                                                        "doctor", "dashboard", "metrics", "context", "experts", "skills",
                                                        "trust", "readonly", "git", "list", "read", "search", "grep",
                                                        "session", "project", "undo", "budget", "peek", "pause", "resume",
-                                                       "approve", "reject"}:
+                                                       "approve", "reject", "model"}:
                         shared.console.print("[swarm.dim]Busy processing previous prompt. Wait, or use /abort.[/swarm.dim]")
                         continue
 
@@ -1181,6 +1191,35 @@ async def _chat_async(session_name: str | None = None):
                             if current > 0:
                                 remaining = max(0, current - shared.state.global_cost_usd)
                                 shared.console.print(f"  [bold]Remaining:[/bold]       ${remaining:.4f}")
+
+                    elif cmd == "model":
+                        model_parts = arg.split() if arg else []
+                        if not model_parts or model_parts[0] == "list":
+                            tiers = get_model_tiers()
+                            tbl = Table(title="Model Tiers", show_header=True, header_style="bold")
+                            tbl.add_column("Tier", style="bold cyan")
+                            tbl.add_column("Model")
+                            tbl.add_column("Input/1M", justify="right")
+                            tbl.add_column("Cached/1M", justify="right")
+                            tbl.add_column("Output/1M", justify="right")
+                            for tier, model_name in tiers.items():
+                                inp, cached, out = shared._get_pricing(model_name)
+                                tbl.add_row(tier, model_name, f"${inp:.2f}", f"${cached:.2f}", f"${out:.2f}")
+                            shared.console.print()
+                            shared.console.print(tbl)
+                            shared.console.print()
+                        elif model_parts[0] == "reset":
+                            reset_model_tiers()
+                            shared.console.print("[swarm.accent]Model tiers restored to defaults.[/swarm.accent]")
+                        elif len(model_parts) == 2:
+                            m_tier, m_name = model_parts
+                            try:
+                                set_model_tier(m_tier, m_name)
+                                shared.console.print(f"[swarm.accent]Tier '[bold]{m_tier}[/bold]' → {m_name}[/swarm.accent]")
+                            except ValueError as e:
+                                shared.console.print(f"[swarm.warning]{e}[/swarm.warning]")
+                        else:
+                            shared.console.print("[swarm.dim]Usage: /model [list|reset|<tier> <model-name>][/swarm.dim]")
 
                     elif cmd == "self-improve":
                         if not arg:

@@ -21,12 +21,36 @@ from grokswarm.tools_registry import READ_ONLY_TOOLS
 #   reasoning  — standard agent execution (default)
 #   hardcore   — complex planning, decomposition, difficult debugging
 #   multi_agent — orchestrator task decomposition
-MODEL_ROUTING = {
+_DEFAULT_MODEL_ROUTING = {
     "fast":        "grok-4-1-fast-non-reasoning",
     "reasoning":   "grok-4-1-fast-reasoning",
     "hardcore":    "grok-4.20-experimental-beta-latest",
     "multi_agent": "grok-4.20-multi-agent-experimental-beta-latest",
 }
+MODEL_ROUTING = dict(_DEFAULT_MODEL_ROUTING)
+
+_VALID_TIERS = frozenset(_DEFAULT_MODEL_ROUTING)
+
+
+def set_model_tier(tier: str, model: str) -> None:
+    """Update a tier's model name. Raises ValueError for invalid tiers."""
+    if tier not in _VALID_TIERS:
+        raise ValueError(f"Invalid tier '{tier}'. Must be one of: {', '.join(sorted(_VALID_TIERS))}")
+    MODEL_ROUTING[tier] = model
+    if tier == "reasoning":
+        shared.MODEL = model
+
+
+def get_model_tiers() -> dict[str, str]:
+    """Return a copy of the current MODEL_ROUTING."""
+    return dict(MODEL_ROUTING)
+
+
+def reset_model_tiers() -> None:
+    """Restore MODEL_ROUTING to defaults."""
+    MODEL_ROUTING.clear()
+    MODEL_ROUTING.update(_DEFAULT_MODEL_ROUTING)
+    shared.MODEL = _DEFAULT_MODEL_ROUTING["reasoning"]
 
 
 # ---------------------------------------------------------------------------
