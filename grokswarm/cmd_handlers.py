@@ -143,7 +143,9 @@ async def handle_grep(arg: str, ctx: CmdContext) -> None:
 
 async def handle_swarm(arg: str, ctx: CmdContext) -> None:
     if not arg:
-        shared.console.print("[swarm.warning]Usage: /swarm <task>[/swarm.warning]")
+        shared.state.swarm_mode = not shared.state.swarm_mode
+        label = "ON" if shared.state.swarm_mode else "OFF"
+        shared.console.print(f"[swarm.info]Swarm mode {label}[/swarm.info]")
     else:
         from grokswarm.repl import _swarm_async
         await _swarm_async(arg)

@@ -647,6 +647,7 @@ def main(
     max_tokens: int = typer.Option(None, "--max-tokens", help="Override max output tokens per response (default: 16384)"),
     project_dir: str = typer.Option(None, "--project-dir", "-d", help="Set project directory (default: current working directory)"),
     dualhead: bool = typer.Option(False, "--dualhead", help="Enable dualhead mode: Grok plans, Claude reviews before execution"),
+    swarm: bool = typer.Option(False, "--swarm", help="Enable swarm mode: route all messages through the Orchestrator"),
 ):
     from grokswarm.context import IGNORE_DIRS, _IGNORE_PATTERNS, _IGNORE_LITERALS
     import grokswarm.context as context_mod
@@ -696,6 +697,9 @@ def main(
             shared.state.dualhead_mode = True
         else:
             shared.console.print("[swarm.warning]--dualhead ignored: Claude Code CLI not found in PATH[/swarm.warning]")
+
+    if swarm:
+        shared.state.swarm_mode = True
 
     if ctx.invoked_subcommand is None:
         show_welcome(session)
@@ -993,6 +997,7 @@ async def _chat_async(session_name: str | None = None):
         vi_tag = " <ansicyan>[VI]</ansicyan>" if getattr(shared.state, 'vi_mode', False) else ""
         claude_tag = " <ansimagenta>[CLAUDE]</ansimagenta>" if getattr(shared.state, 'claude_mode', False) else ""
         dualhead_tag = " <ansimagenta>[DUALHEAD]</ansimagenta>" if getattr(shared.state, 'dualhead_mode', False) else ""
+        swarm_tag = " <ansiyellow>[SWARM]</ansiyellow>" if getattr(shared.state, 'swarm_mode', False) else ""
         # Session plan progress
         plan_tag = ""
         if getattr(shared.state, 'planning_mode', False):
@@ -1013,7 +1018,7 @@ async def _chat_async(session_name: str | None = None):
             f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{model_short}</ansidarkgray>"
             f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{tok_str} tok</ansidarkgray>"
             f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{cost_str}</ansidarkgray>"
-            f"{ctx_tag}{vi_tag}{claude_tag}{dualhead_tag}{plan_tag}{plan_progress}"
+            f"{ctx_tag}{vi_tag}{claude_tag}{dualhead_tag}{swarm_tag}{plan_tag}{plan_progress}"
             f" <ansidarkgray>|</ansidarkgray> <ansimagenta>\u25b6\u25b6</ansimagenta> {mode_str}"
         )
         return HTML("\n".join(parts))
@@ -1104,7 +1109,9 @@ async def _chat_async(session_name: str | None = None):
                     conversation.append({"role": "user", "content": text})
                 conversation = await _trim_conversation(conversation)
                 shared.state.request_auto_approve = False
-                if shared.state.claude_mode and not has_images:
+                if shared.state.swarm_mode and not has_images:
+                    await _swarm_async(text)
+                elif shared.state.claude_mode and not has_images:
                     await _run_claude_prompt(text, conversation)
                 else:
                     await _stream_with_tools(conversation)
