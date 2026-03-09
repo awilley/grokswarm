@@ -1610,12 +1610,28 @@ class TestPlanGate:
 
 
 class TestLoopDetector:
-    def test_detects_same_file_edited_4_times(self):
+    def test_detects_same_file_edited_6_times_no_failures(self):
+        """Without test failures, threshold is 6 edits (refactoring is OK)."""
         ld = LoopDetector()
-        for _ in range(4):
+        for _ in range(6):
             ld.record_tool_call("edit_file", {"path": "foo.py"}, "ok")
         assert ld.check_loop() is not None
         assert "LOOP DETECTED" in ld.check_loop()
+
+    def test_detects_same_file_edited_4_times_with_failures(self):
+        """With test failures, threshold drops to 4 edits."""
+        ld = LoopDetector()
+        ld.record_tool_call("run_tests", {"command": "pytest"}, "[FAIL] AssertionError")
+        for _ in range(4):
+            ld.record_tool_call("edit_file", {"path": "foo.py"}, "ok")
+        assert ld.check_loop() is not None
+
+    def test_no_false_positive_5_edits_no_failures(self):
+        """5 edits without test failures should NOT trigger (threshold=6)."""
+        ld = LoopDetector()
+        for _ in range(5):
+            ld.record_tool_call("edit_file", {"path": "foo.py"}, "ok")
+        assert ld.check_loop() is None
 
     def test_no_false_positive_under_threshold(self):
         ld = LoopDetector()

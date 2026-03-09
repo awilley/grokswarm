@@ -441,6 +441,81 @@ EVAL_TASKS: list[EvalTask] = [
             check_python_compiles("wordcount.py"),
         ],
     ),
+
+    # -- Category D: Multi-Agent / Swarm --
+    EvalTask(
+        id="D1_delegate_subtask",
+        category="D",
+        description="Supervisor delegates a coding subtask to a coder agent",
+        task_prompt=textwrap.dedent("""\
+            You are a supervisor. Spawn a coder agent to create a file called `greeter.py`
+            with a function `greet(name: str) -> str` that returns "Hello, <name>!".
+            After the coder finishes, verify the file exists by reading it.
+            Then write a file called `status.txt` that says "DONE".
+        """),
+        setup_files={},
+        checks=[
+            check_file_exists("greeter.py"),
+            check_function_exists("greeter.py", "greet"),
+            check_python_compiles("greeter.py"),
+            check_file_exists("status.txt"),
+            check_file_contains("status.txt", "DONE"),
+        ],
+        max_rounds=20,
+        timeout=180,
+    ),
+    EvalTask(
+        id="D2_multi_file_coordination",
+        category="D",
+        description="Agent spawns helper to build module, then writes tests itself",
+        task_prompt=textwrap.dedent("""\
+            Create a project with two files:
+            1. Spawn a coder agent named 'builder' to create `mathlib.py` with functions:
+               - add(a, b) -> a + b
+               - subtract(a, b) -> a - b
+               - multiply(a, b) -> a * b
+            2. After the builder agent finishes, write `test_mathlib.py` yourself with
+               tests for all three functions. Run the tests to make sure they pass.
+        """),
+        setup_files={},
+        checks=[
+            check_file_exists("mathlib.py"),
+            check_file_exists("test_mathlib.py"),
+            check_python_compiles("mathlib.py"),
+            check_python_compiles("test_mathlib.py"),
+            check_function_exists("mathlib.py", "add"),
+            check_function_exists("mathlib.py", "subtract"),
+            check_function_exists("mathlib.py", "multiply"),
+            check_pytest_passes("test_mathlib.py"),
+        ],
+        max_rounds=25,
+        timeout=240,
+    ),
+    EvalTask(
+        id="D3_message_passing",
+        category="D",
+        description="Two agents coordinate via message bus",
+        task_prompt=textwrap.dedent("""\
+            1. Spawn a researcher agent named 'scanner' with the task:
+               "Read all .py files in this directory and send a message listing
+                every function name you find. Use send_message to report results."
+            2. Wait for the scanner to finish (check messages).
+            3. Write a file called `summary.txt` with the list of functions found.
+        """),
+        setup_files={
+            "module_a.py": "def alpha(): pass\ndef beta(): pass\n",
+            "module_b.py": "def gamma(x): return x * 2\ndef delta(): pass\n",
+        },
+        checks=[
+            check_file_exists("summary.txt"),
+            check_file_contains("summary.txt", "alpha"),
+            check_file_contains("summary.txt", "beta"),
+            check_file_contains("summary.txt", "gamma"),
+            check_file_contains("summary.txt", "delta"),
+        ],
+        max_rounds=25,
+        timeout=240,
+    ),
 ]
 
 
@@ -675,6 +750,42 @@ class TestEvalBugFixTasks:
         _setup_workspace(task, tmp_path)
         ok, _ = check_pytest_passes("test_calc.py")(tmp_path)
         assert ok is False, "test_calc.py should fail before fix"
+
+
+class TestEvalSwarmTasks:
+    """Verify Category D task definitions are valid and setup files work."""
+
+    def test_D_tasks_exist(self):
+        d_tasks = [t for t in EVAL_TASKS if t.category == "D"]
+        assert len(d_tasks) >= 3, f"Expected at least 3 Category D tasks, got {len(d_tasks)}"
+
+    def test_D3_setup_files(self, tmp_path):
+        task = next(t for t in EVAL_TASKS if t.id == "D3_message_passing")
+        _setup_workspace(task, tmp_path)
+        assert (tmp_path / "module_a.py").exists()
+        assert (tmp_path / "module_b.py").exists()
+        content_a = (tmp_path / "module_a.py").read_text()
+        assert "def alpha" in content_a
+        assert "def beta" in content_a
+
+    def test_swarm_bus_roundtrip(self):
+        """Verify SwarmBus can post and read messages."""
+        bus = SwarmBus(":memory:")
+        bus.post("agent_a", "hello from A", recipient="agent_b", kind="request")
+        bus.post("agent_b", "reply from B", recipient="agent_a", kind="result")
+        msgs = bus.read("agent_b")
+        assert len(msgs) >= 1
+        assert any("hello from A" in m["body"] for m in msgs)
+        bus.close()
+
+    def test_swarm_bus_broadcast(self):
+        """Verify broadcast messages are visible to all agents."""
+        bus = SwarmBus(":memory:")
+        bus.post("supervisor", "task update", recipient="*", kind="status")
+        msgs = bus.read("any_agent")
+        assert len(msgs) >= 1
+        assert msgs[0]["body"] == "task update"
+        bus.close()
 
 
 class TestEvalReport:
