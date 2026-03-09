@@ -635,6 +635,7 @@ def main(
     api_key: str = typer.Option(None, "--api-key", help="Override API key (instead of XAI_API_KEY env var)"),
     max_tokens: int = typer.Option(None, "--max-tokens", help="Override max output tokens per response (default: 16384)"),
     project_dir: str = typer.Option(None, "--project-dir", "-d", help="Set project directory (default: current working directory)"),
+    dualhead: bool = typer.Option(False, "--dualhead", help="Enable dualhead mode: Grok plans, Claude reviews before execution"),
 ):
     from grokswarm.context import IGNORE_DIRS, _IGNORE_PATTERNS, _IGNORE_LITERALS
     import grokswarm.context as context_mod
@@ -677,6 +678,13 @@ def main(
     if api_key or base_url:
         from grokswarm import llm
         llm.reset_client(api_key=api_key or shared.XAI_API_KEY)
+
+    if dualhead:
+        import shutil
+        if shutil.which("claude"):
+            shared.state.dualhead_mode = True
+        else:
+            shared.console.print("[swarm.warning]--dualhead ignored: Claude Code CLI not found in PATH[/swarm.warning]")
 
     if ctx.invoked_subcommand is None:
         show_welcome(session)
