@@ -53,23 +53,57 @@ Be concise — 3-5 lines max. Working directory is: """ + str(shared.PROJECT_DIR
 
 
 def _approval_prompt(command: str, is_dangerous: bool = False) -> str:
-    if is_dangerous:
-        label = "[bold red]CONFIRM dangerous command? [y/n/i/trust][/bold red] "
-    else:
-        label = "Approve command? [y/n/i/trust] "
+    import sys
+    out = sys.__stdout__
+    sep_color = "\033[31m" if is_dangerous else "\033[33m"  # red vs yellow
+    reset = "\033[0m"
+    dim = "\033[2m"
+    bold = "\033[1m"
+    label = "Confirm dangerous command?" if is_dangerous else "Approve command?"
+
+    # Non-TTY fallback
+    try:
+        is_tty = sys.__stdin__.isatty()
+    except Exception:
+        is_tty = False
+    if not is_tty:
+        return "n"
+
+    out.write(
+        f"\n{sep_color}{'─' * 50}{reset}\n"
+        f"  {bold}{label}{reset}\n"
+        f"  {dim} y {reset} approve"
+        f"   {dim} n {reset} reject"
+        f"   {dim} i {reset} explain"
+        f"   {dim} t {reset} trust all\n"
+    )
+    out.flush()
+
     while True:
-        shared.console.print(f"  [dim](y=yes, n=no, i=info/explain, trust=approve all remaining)[/dim]")
-        answer = shared.console.input(label).strip().lower()
-        if answer in ("y", "yes"):
-            return "y"
-        elif answer in ("n", "no", ""):
+        try:
+            ch = shared._read_single_key()
+        except (EOFError, KeyboardInterrupt):
+            out.write(f"  {dim}> Rejected{reset}\n")
+            out.flush()
             return "n"
-        elif answer in ("i", "info"):
+        key = ch.lower()
+        if key == "y":
+            out.write(f"  {dim}> Approved{reset}\n")
+            out.flush()
+            return "y"
+        elif key in ("n", "\x1b", "\x03"):  # n, Esc, Ctrl+C
+            out.write(f"  {dim}> Rejected{reset}\n")
+            out.flush()
+            return "n"
+        elif key == "i":
+            out.write(f"  {dim}> Explaining...{reset}\n")
+            out.flush()
             return "i"
-        elif answer == "trust":
+        elif key == "t":
+            out.write(f"  {dim}> Trusting all{reset}\n")
+            out.flush()
             return "trust"
-        else:
-            shared.console.print("  [dim]Please enter y, n, i, or trust[/dim]")
+        # Ignore any other key
 
 
 def run_shell(command: str):

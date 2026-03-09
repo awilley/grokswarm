@@ -11,7 +11,7 @@ from pathlib import Path
 from datetime import datetime
 from rich.console import Console
 from rich.theme import Theme
-from rich.prompt import Confirm
+
 from dotenv import load_dotenv
 from prompt_toolkit.history import FileHistory
 
@@ -279,40 +279,98 @@ class SafeFileHistory(FileHistory):
         super().store_string(string.encode('utf-8', errors='replace').decode('utf-8'))
 
 
-def _terminal_confirm(prompt_text: str, default: bool = True) -> bool:
-    """Ask y/n via raw terminal I/O, bypassing Rich and prompt_toolkit.
+def _read_single_key() -> str:
+    """Read a single keypress without requiring Enter."""
+    if sys.platform == "win32":
+        import msvcrt
+        ch = msvcrt.getwch()
+        # Windows special keys send \x00 or \xe0 prefix + second byte — consume both
+        if ch in ("\x00", "\xe0"):
+            msvcrt.getwch()  # discard scan code
+            return ""
+        return ch
+    else:
+        import tty
+        import termios
+        fd = sys.__stdin__.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            ch = sys.__stdin__.read(1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        return ch
 
-    This avoids the contention between patch_stdout and Rich.Confirm
-    that causes spinner characters to leak into approval prompts.
+
+def _terminal_confirm(prompt_text: str, default: bool = True) -> bool:
+    """Ask y/n via single-keypress with ANSI-styled hint bar.
+
+    Bypasses Rich and prompt_toolkit to avoid spinner-character leakage.
     """
-    import sys
-    hint = "Y/n" if default else "y/N"
-    # Strip Rich markup for terminal display
     import re as _re
     clean = _re.sub(r'\[/?[^\]]*\]', '', prompt_text)
-    out = sys.__stdout__  # bypass prompt_toolkit's patch_stdout
-    out.write(f"{clean} [{hint}]: ")
-    out.flush()
+    out = sys.__stdout__
+    sep_color = "\033[90m" if default else "\033[33m"  # gray vs yellow
+    reset = "\033[0m"
+    dim = "\033[2m"
+    bold = "\033[1m"
+
+    # Check for non-TTY (piped input, CI, etc.)
     try:
-        line = sys.__stdin__.readline().strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        out.write("\n")
-        out.flush()
+        is_tty = sys.__stdin__.isatty()
+    except Exception:
+        is_tty = False
+    if not is_tty:
         return default
-    if not line:
-        return default
-    return line in ("y", "yes")
+
+    def_hint_y = " (default)" if default else ""
+    def_hint_n = " (default)" if not default else ""
+    out.write(
+        f"\n{sep_color}{'─' * 50}{reset}\n"
+        f"  {bold}{clean}{reset}\n"
+        f"  {dim} y {reset} approve{def_hint_y}"
+        f"   {dim} n {reset} reject{def_hint_n}"
+        f"   {dim} esc {reset} cancel\n"
+    )
+    out.flush()
+
+    while True:
+        try:
+            ch = _read_single_key()
+        except (EOFError, KeyboardInterrupt):
+            out.write(f"  {dim}> Cancelled{reset}\n")
+            out.flush()
+            return False
+        key = ch.lower()
+        if key == "y":
+            out.write(f"  {dim}> Approved{reset}\n")
+            out.flush()
+            return True
+        elif key == "n":
+            out.write(f"  {dim}> Rejected{reset}\n")
+            out.flush()
+            return False
+        elif key == "\x1b":  # Esc
+            out.write(f"  {dim}> Cancelled{reset}\n")
+            out.flush()
+            return False
+        elif key == "\r":  # Enter → use default
+            label = "Approved" if default else "Rejected"
+            out.write(f"  {dim}> {label}{reset}\n")
+            out.flush()
+            return default
+        elif key == "\x03":  # Ctrl+C
+            out.write(f"  {dim}> Cancelled{reset}\n")
+            out.flush()
+            return False
+        # Ignore any other key (including empty from special keys)
 
 
 def _auto_approve(prompt: str, default: bool = True) -> bool:
     """Auto-approve in trust mode or agent mode, otherwise prompt the user."""
     if state.trust_mode or state.agent_mode > 0:
         return True
-    # When the REPL is active, Rich Confirm.ask() fights with
-    # prompt_toolkit's patch_stdout -- use raw terminal I/O instead.
-    if _toolbar_app_ref and _is_prompt_suspended:
-        return _terminal_confirm(prompt, default)
-    return Confirm.ask(prompt, default=default)
+    return _terminal_confirm(prompt, default)
 
 
 # -- Auto-Checkpoint Constants --

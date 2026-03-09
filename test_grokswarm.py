@@ -7,6 +7,7 @@ Run:  python -m pytest test_grokswarm.py -v
 import asyncio
 import importlib
 import os
+import io
 import re
 import subprocess
 import sys
@@ -262,15 +263,13 @@ class TestReadFile:
 
 class TestWriteFile:
     def test_write_approved(self, tmp_project):
-        with patch.object(_shared, "Confirm") as mock_confirm:
-            mock_confirm.ask.return_value = True
+        with patch.object(_shared, "_terminal_confirm", return_value=True):
             result = _main.write_file("new_file.txt", "hello world")
         assert "Written" in result
         assert (tmp_project / "new_file.txt").read_text() == "hello world"
 
     def test_write_cancelled(self, tmp_project):
-        with patch.object(_shared, "Confirm") as mock_confirm:
-            mock_confirm.ask.return_value = False
+        with patch.object(_shared, "_terminal_confirm", return_value=False):
             result = _main.write_file("cancel.txt", "content")
         assert "Cancelled" in result
         assert not (tmp_project / "cancel.txt").exists()
@@ -285,8 +284,7 @@ class TestWriteFile:
 class TestEditFile:
     def test_single_edit_approved(self, tmp_project):
         (tmp_project / "target.py").write_text("x = 1\ny = 2\nz = 3\n")
-        with patch.object(_shared, "Confirm") as mock_confirm:
-            mock_confirm.ask.return_value = True
+        with patch.object(_shared, "_terminal_confirm", return_value=True):
             result = _main.edit_file("target.py", "y = 2", "y = 42")
         assert "Edited" in result
         assert "y = 42" in (tmp_project / "target.py").read_text()
@@ -298,8 +296,7 @@ class TestEditFile:
 
     def test_edit_multi(self, tmp_project):
         (tmp_project / "multi.py").write_text("a = 1\nb = 2\nc = 3\n")
-        with patch.object(_shared, "Confirm") as mock_confirm:
-            mock_confirm.ask.return_value = True
+        with patch.object(_shared, "_terminal_confirm", return_value=True):
             result = _main.edit_file("multi.py", edits=[
                 {"old_text": "a = 1", "new_text": "a = 10"},
                 {"old_text": "c = 3", "new_text": "c = 30"},
@@ -392,8 +389,7 @@ class TestSelfImproveGuard:
         (shadow_dir / "main.py").write_text("x = 1\n")
         _main.state.self_improve_active = True
         try:
-            with patch.object(_shared, "Confirm") as mock_confirm:
-                mock_confirm.ask.return_value = True
+            with patch.object(_shared, "_terminal_confirm", return_value=True):
                 result = asyncio.run(_main._execute_tool("edit_file", {
                     "path": ".grokswarm/shadow/main.py",
                     "old_text": "x = 1",
@@ -406,8 +402,7 @@ class TestSelfImproveGuard:
     def test_no_block_when_not_active(self, tmp_project):
         (tmp_project / "main.py").write_text("x = 1\n")
         _main.state.self_improve_active = False
-        with patch.object(_shared, "Confirm") as mock_confirm:
-            mock_confirm.ask.return_value = True
+        with patch.object(_shared, "_terminal_confirm", return_value=True):
             result = asyncio.run(_main._execute_tool("edit_file", {
                 "path": "main.py",
                 "old_text": "x = 1",
@@ -441,8 +436,7 @@ class TestGitHelpers:
         assert isinstance(result, str)
 
     def test_git_init_and_status(self, tmp_project):
-        with patch.object(_shared, "Confirm") as mock_confirm:
-            mock_confirm.ask.return_value = True
+        with patch.object(_shared, "_terminal_confirm", return_value=True):
             init_result = _main.git_init()
         if "Already" not in init_result:
             assert "Initialized" in init_result or "init" in init_result.lower()
@@ -739,8 +733,7 @@ class TestMultiLevelUndo:
     def test_new_file_gets_none_sentinel(self, tmp_project):
         """B12: write_file on a new file should store (path, None) in _edit_history."""
         _main.state.edit_history.clear()
-        with patch.object(_shared, "Confirm") as mock_confirm:
-            mock_confirm.ask.return_value = True
+        with patch.object(_shared, "_terminal_confirm", return_value=True):
             asyncio.run(_main._execute_tool("write_file", {"path": "brand_new.txt", "content": "hello"}))
         assert len(_main.state.edit_history) >= 1
         path, content = _main.state.edit_history[-1]
@@ -751,8 +744,7 @@ class TestMultiLevelUndo:
         """B12: edit on existing file stores previous content, not None."""
         (tmp_project / "existing.txt").write_text("original")
         _main.state.edit_history.clear()
-        with patch.object(_shared, "Confirm") as mock_confirm:
-            mock_confirm.ask.return_value = True
+        with patch.object(_shared, "_terminal_confirm", return_value=True):
             asyncio.run(_main._execute_tool("edit_file", {
                 "path": "existing.txt",
                 "old_text": "original",
@@ -1088,22 +1080,30 @@ class TestApprovalPrompt:
     """Tests for the y/n/i/trust command approval system."""
 
     def test_approval_prompt_returns_y(self, monkeypatch):
-        monkeypatch.setattr(_main.console, "input", lambda _: "y")
+        monkeypatch.setattr(_shared, "_read_single_key", lambda: "y")
+        monkeypatch.setattr(sys, "__stdin__", type("FakeTTY", (), {"isatty": lambda self: True})())
+        monkeypatch.setattr(sys, "__stdout__", io.StringIO())
         result = _main._approval_prompt("ls -la")
         assert result == "y"
 
     def test_approval_prompt_returns_n_on_empty(self, monkeypatch):
-        monkeypatch.setattr(_main.console, "input", lambda _: "")
+        monkeypatch.setattr(_shared, "_read_single_key", lambda: "n")
+        monkeypatch.setattr(sys, "__stdin__", type("FakeTTY", (), {"isatty": lambda self: True})())
+        monkeypatch.setattr(sys, "__stdout__", io.StringIO())
         result = _main._approval_prompt("ls -la")
         assert result == "n"
 
     def test_approval_prompt_returns_trust(self, monkeypatch):
-        monkeypatch.setattr(_main.console, "input", lambda _: "trust")
+        monkeypatch.setattr(_shared, "_read_single_key", lambda: "t")
+        monkeypatch.setattr(sys, "__stdin__", type("FakeTTY", (), {"isatty": lambda self: True})())
+        monkeypatch.setattr(sys, "__stdout__", io.StringIO())
         result = _main._approval_prompt("ls -la")
         assert result == "trust"
 
     def test_approval_prompt_returns_i(self, monkeypatch):
-        monkeypatch.setattr(_main.console, "input", lambda _: "i")
+        monkeypatch.setattr(_shared, "_read_single_key", lambda: "i")
+        monkeypatch.setattr(sys, "__stdin__", type("FakeTTY", (), {"isatty": lambda self: True})())
+        monkeypatch.setattr(sys, "__stdout__", io.StringIO())
         result = _main._approval_prompt("ls -la")
         assert result == "i"
 
