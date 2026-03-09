@@ -137,15 +137,13 @@ Call update_plan to mark all completed steps, then provide your final summary.""
     @staticmethod
     def validate_completion(agent, tool_actions: list[str], full_output: str) -> dict:
         """Cross-references agent claims against actual tool results.
-        Returns {valid: bool, issues: list[str]}"""
+        Returns {valid: bool, issues: list[str]}
+
+        Note: plan-step completion is NOT checked here. Agents frequently
+        forget to call update_plan even when work is done, causing false
+        positives that trigger wasteful verification rounds.
+        """
         issues = []
-        if agent.plan:
-            incomplete = [s for s in agent.plan if s["status"] not in ("done", "skipped")]
-            if incomplete:
-                issues.append(
-                    f"{len(incomplete)} plan steps not marked done: "
-                    f"{[s['step'] for s in incomplete]}"
-                )
         # Check if any file mutations happened without subsequent test run
         has_mutations = any("edit_file" in a or "write_file" in a for a in tool_actions)
         has_tests = any("run_tests" in a for a in tool_actions)

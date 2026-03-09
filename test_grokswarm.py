@@ -1910,7 +1910,7 @@ class TestGetAgentToolSchemas:
         assert "read_file" in names
         assert "write_file" in names
         assert "update_plan" in names
-        assert "spawn_agent" not in names  # excluded for agents
+        assert "spawn_agent" in names  # agents can now delegate
 
     def test_filters_to_allowed_set(self):
         from grokswarm.tools_registry import get_agent_tool_schemas
