@@ -703,7 +703,7 @@ async def _chat_async(session_name: str | None = None):
 
     kb = KeyBindings()
 
-    @kb.add('escape', eager=True)
+    @kb.add('escape')
     def _handle_escape(event):
         if shared.state.vi_mode:
             return  # let prompt_toolkit's vi handler process escape
@@ -744,22 +744,32 @@ async def _chat_async(session_name: str | None = None):
 
     @kb.add('escape', 'v', eager=True)
     def _handle_paste_image(event):
+        import time as _time
         try:
             from PIL import ImageGrab
+        except ImportError:
+            shared._toolbar_status = "Pillow not installed (pip install Pillow)"
+            shared._toolbar_status_expires = _time.monotonic() + 2.0
+            event.app.invalidate()
+            return
+        try:
             import base64
             from io import BytesIO
             img = ImageGrab.grabclipboard()
             if img is None:
+                shared._toolbar_status = "No image in clipboard"
+                shared._toolbar_status_expires = _time.monotonic() + 2.0
+                event.app.invalidate()
                 return
             buf = BytesIO()
             img.save(buf, format='PNG')
             b64 = base64.b64encode(buf.getvalue()).decode('ascii')
             shared._pending_images.append(f"data:image/png;base64,{b64}")
             event.app.invalidate()
-        except ImportError:
-            pass
         except Exception:
-            pass
+            shared._toolbar_status = "Failed to grab clipboard image"
+            shared._toolbar_status_expires = _time.monotonic() + 2.0
+            event.app.invalidate()
 
     _multiline_supported = False
     try:
@@ -790,8 +800,12 @@ async def _chat_async(session_name: str | None = None):
     _toolbar_spinner_task = None
 
     async def _spinner_tick():
+        import time as _time
         while True:
             await asyncio.sleep(0.12)
+            if shared._toolbar_status_expires and _time.monotonic() >= shared._toolbar_status_expires:
+                shared._toolbar_status = ""
+                shared._toolbar_status_expires = 0.0
             if shared._toolbar_status and not shared._toolbar_suspended and not shared._is_prompt_suspended:
                 shared._toolbar_spinner_idx += 1
                 if shared._toolbar_app_ref:

@@ -48,6 +48,7 @@ _toolbar_status = ""
 _toolbar_spinner_idx = 0
 _toolbar_app_ref = None
 _toolbar_suspended = False
+_toolbar_status_expires: float = 0.0
 
 # State for safely pausing the main prompt loop
 _prompt_suspend_event = asyncio.Event()

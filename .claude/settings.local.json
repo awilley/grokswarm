@@ -22,7 +22,9 @@
       "Bash(PYTHONUTF8=1 python:*)",
       "Bash(test:*)",
       "Bash(rm:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(claude:*)",
+      "Bash(env:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
