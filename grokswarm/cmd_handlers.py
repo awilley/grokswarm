@@ -833,8 +833,14 @@ async def handle_self_scores(arg: str, ctx: CmdContext) -> None:
         except (json.JSONDecodeError, OSError):
             pass
 
-    # Build task catalog from both eval modules
+    # Build task catalog from all eval modules
     all_tasks: dict[str, dict] = {}
+    try:
+        from eval_grokswarm import EVAL_TASKS as BASIC_TASKS
+        for t in BASIC_TASKS:
+            all_tasks[t.id] = {"category": t.category, "description": t.description}
+    except ImportError:
+        pass
     try:
         from eval_deep import DEEP_EVAL_TASKS
         for t in DEEP_EVAL_TASKS:
@@ -865,9 +871,20 @@ async def handle_self_scores(arg: str, ctx: CmdContext) -> None:
                 shared.console.print(f"[swarm.warning]Unknown task: {task_id}[/swarm.warning]")
             return
         d = scores[task_id]
+        s_over = d.get("single_overall", 0) or 0
+        w_over = d.get("swarm_overall", 0) or 0
+        has_swarm = d.get("swarm_quality", 0) > 0 or d.get("swarm_cost_score", 0) > 0
+        if not has_swarm:
+            verdict = "Single Only"
+        elif s_over - w_over > 0.05:
+            verdict = "Single Better"
+        elif w_over - s_over > 0.05:
+            verdict = "Swarm Better"
+        else:
+            verdict = "Tie"
         shared.console.print(f"\n[bold cyan]{task_id}[/bold cyan] — {d.get('description', '')}")
         shared.console.print(f"  [bold]Category:[/bold]  {d.get('category', '?')}")
-        shared.console.print(f"  [bold]Verdict:[/bold]   {d.get('verdict', '?')}")
+        shared.console.print(f"  [bold]Verdict:[/bold]   {verdict} (S.Overall={s_over:.0%} W.Overall={w_over:.0%})")
         shared.console.print(f"  [bold]Updated:[/bold]   {d.get('updated', '?')}")
         shared.console.print()
         shared.console.print(f"  [bold]Single:[/bold]  quality={d.get('single_quality', 0):.0%}  "
@@ -924,8 +941,18 @@ async def handle_self_scores(arg: str, ctx: CmdContext) -> None:
         d = scores.get(tid)
         if d:
             def _f(v): return f"{v:.0%}" if isinstance(v, (int, float)) else "--"
-            verdict = d.get("verdict", "?").replace("_", " ").title()
             has_swarm = d.get("swarm_quality", 0) > 0 or d.get("swarm_cost_score", 0) > 0
+            # Derive verdict from overall scores
+            s_over = d.get("single_overall", 0) or 0
+            w_over = d.get("swarm_overall", 0) or 0
+            if not has_swarm:
+                verdict = "Single Only"
+            elif s_over - w_over > 0.05:
+                verdict = "Single Better"
+            elif w_over - s_over > 0.05:
+                verdict = "Swarm Better"
+            else:
+                verdict = "Tie"
             tbl.add_row(
                 tid, info["category"], info["description"][:30],
                 _f(d.get("single_quality")), _f(d.get("single_cost_score")),

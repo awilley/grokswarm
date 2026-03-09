@@ -861,6 +861,35 @@ async def _run_live_eval(task_ids: list[str] | None = None):
     json_path.write_text(json.dumps([asdict(r) for r in results], indent=2))
     print(f"Results saved to: {json_path}")
 
+    # Save efficiency scores (convert EvalResult → ComparativeResult)
+    try:
+        from eval_deep import ComparativeResult, RunMetrics, _compute_efficiency_scores, _save_eval_scores
+        task_map = {t.id: t for t in EVAL_TASKS}
+        score_results = []
+        for r in results:
+            t = task_map.get(r.task_id)
+            cr = ComparativeResult(
+                task_id=r.task_id,
+                category=t.category if t else "",
+                description=t.description if t else "",
+                single=RunMetrics(
+                    quality_score=r.correct,
+                    cost_usd=r.cost_usd,
+                    time_seconds=r.time_seconds,
+                    tokens_used=r.tokens_used,
+                    checks_passed=sum(1 for c in r.check_details if c.get("passed")),
+                    checks_total=len(r.check_details),
+                    check_details=r.check_details,
+                ),
+                verdict="single_only",
+            )
+            _compute_efficiency_scores(cr)
+            score_results.append(cr)
+        scores_path = _save_eval_scores(score_results)
+        print(f"Scores saved to: {scores_path}")
+    except ImportError:
+        pass
+
 
 def main():
     import argparse
