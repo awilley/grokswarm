@@ -9,6 +9,7 @@ import sys
 import json
 import shutil
 import asyncio
+import difflib
 import subprocess
 from pathlib import Path
 
@@ -234,6 +235,24 @@ async def handle_undo(arg: str, ctx: CmdContext) -> None:
     else:
         shared.console.print(f"[bold yellow]Undo last edit to:[/bold yellow] {undo_path}")
         shared.console.print(f"[dim]Edit history depth: {len(shared.state.edit_history)}[/dim]")
+        # Show inline diff preview
+        fp_preview = _safe_path(undo_path)
+        if fp_preview and fp_preview.is_file():
+            try:
+                current_text = fp_preview.read_text(encoding="utf-8")
+                diff_lines = list(difflib.unified_diff(
+                    current_text.splitlines(), undo_content.splitlines(),
+                    fromfile="current", tofile="previous", lineterm=""))
+                if diff_lines:
+                    from rich.syntax import Syntax
+                    display_lines = diff_lines[:50]
+                    extra = len(diff_lines) - 50
+                    diff_text = "\n".join(display_lines)
+                    if extra > 0:
+                        diff_text += f"\n... (+{extra} more lines)"
+                    shared.console.print(Syntax(diff_text, "diff", theme="monokai"))
+            except Exception:
+                pass
         if shared._terminal_confirm("Restore previous content?", default=False):
             fp = _safe_path(undo_path)
             if fp:
@@ -786,6 +805,30 @@ async def handle_history(arg: str, ctx: CmdContext) -> None:
     shared.console.print()
     shared.console.print(tbl)
     shared.console.print()
+    # Fuzzy replay picker
+    if shown:
+        lookup = {}
+        for entry in shown:
+            key = entry[:80].replace("\n", " ").strip()
+            if key:
+                lookup[key] = entry
+        if lookup:
+            try:
+                from prompt_toolkit import prompt as pt_prompt
+                from prompt_toolkit.completion import FuzzyWordCompleter
+                pick = pt_prompt("replay> ", completer=FuzzyWordCompleter(list(lookup.keys()))).strip()
+            except (EOFError, KeyboardInterrupt):
+                return
+            if pick and pick in lookup:
+                shared._saved_prompt_text = lookup[pick]
+                shared.console.print("[swarm.dim]Selected entry will appear in next prompt.[/swarm.dim]")
+            elif pick:
+                # Try exact match against full entries
+                for entry in shown:
+                    if pick in entry:
+                        shared._saved_prompt_text = entry
+                        shared.console.print("[swarm.dim]Selected entry will appear in next prompt.[/swarm.dim]")
+                        break
 
 
 async def handle_vim(arg: str, ctx: CmdContext) -> None:

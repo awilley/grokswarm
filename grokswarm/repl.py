@@ -422,8 +422,29 @@ def _handle_session_command(arg: str, conversation: list, current_session: str |
         return subarg
     elif subcmd == "load":
         if not subarg:
-            shared.console.print("[swarm.warning]Usage: /session load <name>[/swarm.warning]")
-            return None
+            sessions = list_sessions()
+            if not sessions:
+                shared.console.print("[swarm.dim]No saved sessions to load.[/swarm.dim]")
+                return None
+            names = [s["name"] for s in sessions]
+            shared.console.print("[swarm.accent]Sessions:[/swarm.accent]")
+            for i, n in enumerate(names, 1):
+                shared.console.print(f"  [bold]{i}.[/bold] {n}")
+            try:
+                from prompt_toolkit import prompt as pt_prompt
+                from prompt_toolkit.completion import FuzzyWordCompleter
+                pick = pt_prompt("load session> ", completer=FuzzyWordCompleter(names)).strip()
+            except (EOFError, KeyboardInterrupt):
+                shared.console.print("[swarm.dim]Cancelled.[/swarm.dim]")
+                return None
+            if not pick:
+                shared.console.print("[swarm.dim]Cancelled.[/swarm.dim]")
+                return None
+            # Allow picking by number
+            if pick.isdigit() and 1 <= int(pick) <= len(names):
+                subarg = names[int(pick) - 1]
+            else:
+                subarg = pick
         result = load_session(subarg)
         if result:
             msgs, summary = result
@@ -801,13 +822,12 @@ async def _chat_async(session_name: str | None = None):
             agent_parts = []
             for aname, ag in active_agents[:2]:
                 if ag.plan:
-                    current = next((s for s in ag.plan if s["status"] == "in-progress"), None)
                     done = sum(1 for s in ag.plan if s["status"] == "done")
                     total = len(ag.plan)
-                    if current:
-                        agent_parts.append(f"{aname}: Step {done+1}/{total} \"{current['step'][:30]}\"")
-                    else:
-                        agent_parts.append(f"{aname}: {ag.phase.title()}...")
+                    bar_w = 10
+                    filled = int(bar_w * done / total) if total else 0
+                    bar = "\u2501" * filled + "\u2578" + "\u2500" * max(0, bar_w - filled - 1)
+                    agent_parts.append(f"{aname} [{bar}] {done}/{total}")
                 else:
                     agent_parts.append(f"{aname}: {ag.phase.title()}...")
             parts.append(f"  <ansidarkgray>{len(active_agents)} agent{'s' if len(active_agents) != 1 else ''} running | {' | '.join(agent_parts)}</ansidarkgray>")
