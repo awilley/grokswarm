@@ -1376,6 +1376,7 @@ class GuardrailPipeline:
         self.verification_prompted = False
         self._is_simple_task = False
         self._step_notified: set[str] = set()
+        self._needs_deliberation = False  # set after plan transition when dualhead is on
 
         # Model routing — sub-agents use reasoning for planning (task already
         # well-defined by orchestrator decomposition, no need for expensive hardcore)
@@ -1582,8 +1583,73 @@ class GuardrailPipeline:
                     _auto_print(f"[{self.display_name}] Plan: {len(self.agent.plan)} steps -- /reject {self.display_name} <feedback> to revise")
                     PlanGate.transition_to_executing(self.agent)
                     shared._log(f"agent {self.display_name}: plan posted, auto-transitioned to executing")
+                # Flag for dualhead deliberation (async review happens in agent loop)
+                if shared.state.dualhead_mode:
+                    self._needs_deliberation = True
 
         return deviation
+
+    async def deliberate_on_agent_plan(self, conversation: list[dict]):
+        """If dualhead flag is set, send the agent's plan to Claude for review.
+
+        Injects Claude's feedback into the conversation so Grok can revise
+        before executing. Clears the flag after running.
+        """
+        if not self._needs_deliberation:
+            return
+        self._needs_deliberation = False
+
+        plan_steps = self.agent.plan
+        if not plan_steps:
+            return
+
+        plan_text = "\n".join(f"{i+1}. {s.get('step', s)}" for i, s in enumerate(plan_steps))
+        formatted = (
+            f"## Agent: {self.display_name}\n"
+            f"## Task: {self.task_desc}\n\n"
+            f"**Plan ({len(plan_steps)} steps):**\n{plan_text}"
+        )
+
+        reviewer = ClaudeReviewer()
+        deliberator = Deliberator(reviewer)
+        project_summary = deliberator._build_project_summary()
+
+        prompt = reviewer.build_review_prompt(
+            formatted, project_summary, Deliberator.CAPABILITIES, []
+        )
+
+        notify(f"Dualhead: sending {self.display_name}'s plan to Claude for review")
+        shared.console.print(
+            f"\n[bold green]\\[Grok → Claude][/bold green] "
+            f"Reviewing {self.display_name}'s plan..."
+        )
+
+        feedback = await reviewer.review(prompt)
+        approved = ExternalReviewer.parse_approval(feedback)
+
+        label = "APPROVED" if approved else "FEEDBACK"
+        color = "green" if approved else "yellow"
+        shared.console.print(
+            f"[bold {color}]\\[Claude → Grok][/bold {color}] {label}"
+        )
+        display_fb = feedback[:800] + "..." if len(feedback) > 800 else feedback
+        shared.console.print(f"[dim]{display_fb}[/dim]")
+
+        if not approved:
+            conversation.append({
+                "role": "user",
+                "content": (
+                    "[DUALHEAD REVIEW] An external reviewer (Claude) has feedback on your plan:\n\n"
+                    f"{feedback}\n\n"
+                    "Revise your plan with update_plan to address this feedback, then proceed."
+                ),
+            })
+            # Revert to planning so agent must update_plan again
+            self.agent.phase = "planning"
+            self.agent.approved_plan = None
+            shared._log(f"agent {self.display_name}: dualhead review — sent back to planning")
+        else:
+            notify(f"Dualhead: {self.display_name}'s plan approved by Claude")
 
     def check_verification_gate(self, round_num: int, max_rounds: int, conversation: list[dict]) -> bool:
         """Check if agent should be forced to run tests. Returns True to continue loop."""

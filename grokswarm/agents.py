@@ -638,6 +638,9 @@ Rules:
 
             agent.current_tool = None
 
+            # Dualhead: if agent just submitted a plan and dualhead is on, get Claude review
+            await gp.deliberate_on_agent_plan(conversation)
+
             # Guardrail: loop detection + milestone notifications
             if gp.on_round_end(_round, conversation):
                 break
@@ -689,6 +692,7 @@ Rules:
                         if tc.function.name == "run_tests":
                             gp.ran_tests = True
                         gp.on_tool_result(tc.function.name, tc_args, result_str, rounds_used)
+                    await gp.deliberate_on_agent_plan(conversation)
                     if gp.on_round_end(rounds_used, conversation):
                         break
                 else:
