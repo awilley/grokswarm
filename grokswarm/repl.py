@@ -835,7 +835,7 @@ async def _chat_async(session_name: str | None = None):
         proj_name = shared.PROJECT_DIR.name
         model_short = shared.MODEL.split("/")[-1].split("-")[-1][:12] if shared.MODEL else "?"
         tok_str = _fmt_tokens(shared.state.global_tokens_used)
-        cost_str = f"${shared.state.global_cost_usd:.3f}"
+        cost_str = f"${shared.state.project_cost_usd:.3f}"
         vi_tag = " <ansicyan>[VI]</ansicyan>" if getattr(shared.state, 'vi_mode', False) else ""
         parts.append(
             f"  <ansidarkgray>{proj_name}</ansidarkgray>"

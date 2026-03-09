@@ -198,7 +198,8 @@ def _build_dashboard() -> Layout:
         f"[bold]Prompt Tokens:[/bold]     {metrics['prompt_tokens']:,}",
         f"[bold]Completion Tokens:[/bold] {metrics['completion_tokens']:,}",
         f"[bold]Total Tokens:[/bold]      {total_tokens:,}",
-        f"[bold]Global Cost:[/bold]       ${shared.state.global_cost_usd:.4f}",
+        f"[bold]Session Cost:[/bold]      ${shared.state.global_cost_usd:.4f}",
+        f"[bold]Project Cost:[/bold]      ${shared.state.project_cost_usd:.4f}",
     ]
     if shared.state.global_cost_budget_usd > 0:
         metrics_lines.append(f"[bold]Cost Budget:[/bold]      ${shared.state.global_cost_budget_usd:.4f}")

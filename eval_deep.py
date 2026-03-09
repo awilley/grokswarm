@@ -692,6 +692,135 @@ TASK_E2 = DeepEvalTask(
     ],
 )
 
+# -- E3: Three Independent Algorithm Modules (Heavy Parallel Comparison) --
+
+TASK_E3 = DeepEvalTask(
+    id="E3",
+    category="E",
+    description="Three independent algorithm modules — heavy parallel comparison",
+    task_prompt=textwrap.dedent("""\
+        Create three independent Python algorithm modules, each with its own test file.
+        These are three separate, independent modules with no shared dependencies.
+        Each module must also work as a CLI tool.
+
+        1. `expr_eval.py` — Mathematical expression evaluator
+           Functions:
+           - tokenize(expr: str) -> list[str]: Split expression into tokens
+             (numbers, operators +, -, *, /, and parentheses).
+           - evaluate(expr: str, variables: dict | None = None) -> float:
+             Evaluate a mathematical expression string.
+             Supports: +, -, *, /, parentheses for grouping, float literals,
+             and variable names that are looked up in the variables dict.
+             Operator precedence: * and / bind tighter than + and -.
+             Raises ValueError for: division by zero, unbalanced parentheses,
+             undefined variables, empty or invalid expressions.
+           CLI usage: python expr_eval.py "<expression>" [--var NAME=VALUE ...]
+             Prints the numeric result to stdout.
+             Exit code 1 on any error, with message to stderr.
+           Examples:
+             python expr_eval.py "2 + 3"          -> 5.0
+             python expr_eval.py "2 + 3 * 4"      -> 14.0
+             python expr_eval.py "(2 + 3) * 4"    -> 20.0
+             python expr_eval.py --var x=5 "x * 2 + 1"  -> 11.0
+             python expr_eval.py "1 / 0"          -> error, exit 1
+           Create `test_expr_eval.py` with at least 6 tests covering precedence,
+           parentheses, variables, and error cases.
+
+        2. `pattern_match.py` — Glob-style pattern matcher
+           Functions:
+           - match(pattern: str, text: str) -> bool: Match text against a
+             glob-style pattern. Supports these special characters:
+               *     — matches zero or more of any character
+               ?     — matches exactly one of any character
+               [abc] — matches any single character in the set
+               [!abc] — matches any single character NOT in the set
+             All other characters match literally. Matching is case-sensitive.
+           - filter_matches(pattern: str, texts: list[str]) -> list[str]:
+             Return only texts that match the pattern.
+           IMPORTANT: Do NOT use the `re` module. Implement matching from scratch
+           using your own algorithm (e.g., dynamic programming or recursive backtracking).
+           CLI usage: python pattern_match.py PATTERN TEXT [TEXT ...]
+             Prints matching texts, one per line.
+           Examples:
+             python pattern_match.py "*.py" test.py readme.md  -> test.py
+             python pattern_match.py "file?.txt" file1.txt fileAB.txt -> file1.txt
+             python pattern_match.py "[abc]at" cat dog rat     -> cat
+           Create `test_pattern_match.py` with at least 6 tests covering
+           star, question mark, character classes, negated classes, and no-match cases.
+
+        3. `graph_utils.py` — Weighted directed graph algorithms
+           Graph format: dict[str, dict[str, float]] — adjacency dict with edge weights.
+           Example: {"a": {"b": 1.0, "c": 4.0}, "b": {"c": 2.0}, "c": {}}
+           Functions:
+           - shortest_path(graph: dict, start: str, end: str) -> tuple[list[str], float]:
+             Dijkstra's algorithm. Returns (path_as_node_list, total_distance).
+             Raises ValueError if no path exists or start/end not in graph.
+           - topological_sort(graph: dict) -> list[str]:
+             Kahn's algorithm or DFS-based topological sort for DAGs.
+             Raises ValueError if the graph contains a cycle.
+           - has_cycle(graph: dict) -> bool:
+             Return True if the directed graph contains a cycle, False otherwise.
+           CLI usage:
+             python graph_utils.py shortest '<json_graph>' START END
+             python graph_utils.py topo '<json_graph>'
+             Exit code 1 on error (no path found, cycle in topo sort, etc.)
+           Examples:
+             python graph_utils.py shortest '{"a":{"b":1,"c":10},"b":{"c":2},"c":{}}' a c
+               -> prints path and distance 3
+             python graph_utils.py topo '{"a":{"b":1},"b":{"c":1},"c":{}}'
+               -> prints: a, b, c (or similar valid topological order)
+           Create `test_graph_utils.py` with at least 6 tests covering shortest path,
+           topological sort, cycle detection, and error cases.
+
+        Run ALL tests to verify they pass.
+    """),
+    setup_files={},
+    expert="coder",
+    checks=[
+        # --- expr_eval (13 checks) ---
+        wcheck("expr_exists", check_file_exists("expr_eval.py"), 1.0, "correctness"),
+        wcheck("expr_compiles", check_python_compiles("expr_eval.py"), 1.5, "correctness"),
+        wcheck("has_tokenize", check_function_exists("expr_eval.py", "tokenize"), 1.0, "correctness"),
+        wcheck("has_evaluate", check_function_exists("expr_eval.py", "evaluate"), 1.0, "correctness"),
+        wcheck("test_expr_exists", check_file_exists("test_expr_eval.py"), 0.5, "completeness"),
+        wcheck("test_expr_pass", check_pytest_passes("test_expr_eval.py"), 2.5, "correctness"),
+        wcheck("expr_basic_add", check_cli_args("expr_eval.py", ["2 + 3"], "5"), 1.5, "correctness"),
+        wcheck("expr_precedence", check_cli_args("expr_eval.py", ["2 + 3 * 4"], "14"), 2.0, "correctness"),
+        wcheck("expr_parens", check_cli_args("expr_eval.py", ["(2 + 3) * 4"], "20"), 2.0, "correctness"),
+        wcheck("expr_variables", check_cli_args("expr_eval.py", ["--var", "x=5", "x * 2 + 1"], "11"), 1.5, "quality"),
+        wcheck("expr_div_zero_exit", check_cli_exitcode("expr_eval.py", ["1 / 0"], 1), 1.0, "edge_cases"),
+        wcheck("expr_unbalanced_exit", check_cli_exitcode("expr_eval.py", ["(2 + 3"], 1), 1.0, "edge_cases"),
+        wcheck("expr_importable", check_import_works("expr_eval.py", "expr_eval"), 0.5, "quality"),
+        # --- pattern_match (11 checks) ---
+        wcheck("pat_exists", check_file_exists("pattern_match.py"), 1.0, "correctness"),
+        wcheck("pat_compiles", check_python_compiles("pattern_match.py"), 1.5, "correctness"),
+        wcheck("has_match", check_function_exists("pattern_match.py", "match"), 1.0, "correctness"),
+        wcheck("has_filter_matches", check_function_exists("pattern_match.py", "filter_matches"), 1.0, "correctness"),
+        wcheck("no_re_import", check_file_not_contains("pattern_match.py", "import re"), 1.0, "quality"),
+        wcheck("test_pat_exists", check_file_exists("test_pattern_match.py"), 0.5, "completeness"),
+        wcheck("test_pat_pass", check_pytest_passes("test_pattern_match.py"), 2.5, "correctness"),
+        wcheck("pat_star", check_cli_args("pattern_match.py", ["*.py", "test.py", "readme.md", "main.py"], "test.py"), 1.5, "correctness"),
+        wcheck("pat_question", check_cli_args("pattern_match.py", ["file?.txt", "file1.txt", "fileAB.txt"], "file1.txt"), 1.5, "correctness"),
+        wcheck("pat_charset", check_cli_args("pattern_match.py", ["[abc]at", "cat", "bat", "dog", "rat"], "cat"), 1.5, "edge_cases"),
+        wcheck("pat_importable", check_import_works("pattern_match.py", "pattern_match"), 0.5, "quality"),
+        # --- graph_utils (11 checks) ---
+        wcheck("graph_exists", check_file_exists("graph_utils.py"), 1.0, "correctness"),
+        wcheck("graph_compiles", check_python_compiles("graph_utils.py"), 1.5, "correctness"),
+        wcheck("has_shortest_path", check_function_exists("graph_utils.py", "shortest_path"), 1.0, "correctness"),
+        wcheck("has_topological_sort", check_function_exists("graph_utils.py", "topological_sort"), 1.0, "correctness"),
+        wcheck("has_has_cycle", check_function_exists("graph_utils.py", "has_cycle"), 1.0, "correctness"),
+        wcheck("test_graph_exists", check_file_exists("test_graph_utils.py"), 0.5, "completeness"),
+        wcheck("test_graph_pass", check_pytest_passes("test_graph_utils.py"), 2.5, "correctness"),
+        wcheck("graph_shortest", check_cli_args("graph_utils.py",
+            ["shortest", '{"a":{"b":1,"c":10},"b":{"c":2},"c":{}}', "a", "c"], "3"), 1.5, "correctness"),
+        wcheck("graph_topo", check_cli_args("graph_utils.py",
+            ["topo", '{"a":{"b":1},"b":{"c":1},"c":{}}'], "a"), 1.5, "correctness"),
+        wcheck("graph_cycle_exit", check_cli_exitcode("graph_utils.py",
+            ["topo", '{"a":{"b":1},"b":{"a":1}}'], 1), 1.0, "edge_cases"),
+        wcheck("graph_importable", check_import_works("graph_utils.py", "graph_utils"), 0.5, "quality"),
+    ],
+)
+
 # -- F1: Three Independent Modules (Parallel Speedup) --
 
 TASK_F1 = DeepEvalTask(
@@ -1209,7 +1338,7 @@ I1_RUN2_CHECKS = [
 ]
 
 # All deep eval tasks
-DEEP_EVAL_TASKS: list[DeepEvalTask] = [TASK_E1, TASK_E2, TASK_F1, TASK_G1, TASK_H1, TASK_I1]
+DEEP_EVAL_TASKS: list[DeepEvalTask] = [TASK_E1, TASK_E2, TASK_E3, TASK_F1, TASK_G1, TASK_H1, TASK_I1]
 
 
 # ---------------------------------------------------------------------------
