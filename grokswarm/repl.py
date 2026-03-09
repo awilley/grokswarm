@@ -39,7 +39,7 @@ from grokswarm.cmd_handlers import (
     handle_watch, handle_tell, handle_abort, handle_clear_swarm, handle_agents,
     handle_peek, handle_pause, handle_resume, handle_approve, handle_reject,
     handle_tasks, handle_budget, handle_model, handle_bugs, handle_memory,
-    handle_eval, handle_self_improve, handle_daemon,
+    handle_eval, handle_self_improve, handle_daemon, handle_self_eval,
 )
 
 # ---------------------------------------------------------------------------
@@ -91,6 +91,7 @@ _cmd("self-improve", "Improve own source (shadow + test)",  allow_while_busy=Fal
 _cmd("memory",       "View/prune agent memory files")(handle_memory)
 _cmd("eval",         "Run evaluation harness",              allow_while_busy=False)(handle_eval)
 _cmd("daemon",       "File watcher daemon (auto-test)")(handle_daemon)
+_cmd("self-eval",    "Eval -> fix -> re-eval loop",         allow_while_busy=False)(handle_self_eval)
 # fmt: on
 
 # -- Context-Aware Tab Completion --
