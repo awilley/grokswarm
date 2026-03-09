@@ -126,6 +126,7 @@ class SwarmCompleter(Completer):
     BUGS_SUBCMDS = ["list", "add", "show", "fix", "self", "project"]
     MEMORY_SUBCMDS = ["list", "prune"]
     DAEMON_SUBCMDS = ["start", "stop", "status", "log", "add"]
+    CLAUDE_SUBCMDS = ["dualhead"]
 
     # Class-level attribute — populated after class definition
     SLASH_COMMANDS: dict[str, str] = {}
@@ -183,6 +184,11 @@ class SwarmCompleter(Completer):
         elif cmd == "daemon":
             if not arg_text.endswith(" "):
                 for sc in self.DAEMON_SUBCMDS:
+                    if sc.startswith(arg_text.lower()):
+                        yield Completion(sc, start_position=-len(arg_text))
+        elif cmd == "claude":
+            if not arg_text.endswith(" "):
+                for sc in self.CLAUDE_SUBCMDS:
                     if sc.startswith(arg_text.lower()):
                         yield Completion(sc, start_position=-len(arg_text))
         elif cmd == "project":

@@ -844,6 +844,21 @@ async def handle_vim(arg: str, ctx: CmdContext) -> None:
 
 async def handle_claude(arg: str, ctx: CmdContext) -> None:
     import shutil
+    subcmd = arg.strip().lower() if arg else ""
+
+    if subcmd == "dualhead":
+        if not shutil.which("claude"):
+            shared.console.print("[swarm.error]Claude Code CLI not found in PATH.[/swarm.error]")
+            return
+        shared.state.dualhead_mode = not shared.state.dualhead_mode
+        status = "ON" if shared.state.dualhead_mode else "OFF"
+        shared.console.print(
+            f"[magenta]Dualhead mode [bold]{status}[/bold] — "
+            f"{'Grok plans, Claude reviews before execution' if shared.state.dualhead_mode else 'deliberation disabled'}[/magenta]"
+        )
+        return
+
+    # Original toggle behavior (no subcommand)
     if not shared.state.claude_mode and not shutil.which("claude"):
         shared.console.print("[swarm.error]Claude Code CLI not found in PATH. Install it first: https://docs.anthropic.com/en/docs/claude-code[/swarm.error]")
         return

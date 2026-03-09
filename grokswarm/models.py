@@ -73,6 +73,7 @@ class SwarmState:
     verbose_mode: bool = False
     vi_mode: bool = False
     claude_mode: bool = False
+    dualhead_mode: bool = False
     agent_mode: int = 0
     edit_history: list = field(default_factory=list)
     pending_write_count: int = 0
@@ -122,6 +123,15 @@ class SwarmState:
             if not task.done():
                 task.cancel()
         _background_tasks.clear()
+
+
+@dataclass
+class DeliberationRound:
+    """One round of Grok↔Reviewer deliberation."""
+    round_num: int
+    grok_plan: str          # Grok's formatted plan text
+    reviewer_feedback: str  # Claude's review response
+    approved: bool = False  # True if reviewer approved the plan
 
 
 @dataclass

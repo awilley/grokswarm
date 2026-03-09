@@ -2547,3 +2547,89 @@ class TestBugTracker:
         from grokswarm.tools_registry import READ_ONLY_TOOLS
         assert "list_bugs" in READ_ONLY_TOOLS
         assert "report_bug" in READ_ONLY_TOOLS
+
+
+# ---------------------------------------------------------------------------
+# Dualhead Deliberation Tests
+# ---------------------------------------------------------------------------
+
+class TestDeliberation:
+    """Tests for ExternalReviewer, ClaudeReviewer, Deliberator, and DeliberationRound."""
+
+    def test_parse_approval_yes(self):
+        from grokswarm.guardrails import ExternalReviewer
+        assert ExternalReviewer.parse_approval("APPROVED") is True
+
+    def test_parse_approval_no(self):
+        from grokswarm.guardrails import ExternalReviewer
+        assert ExternalReviewer.parse_approval("Here are my concerns...") is False
+
+    def test_parse_approval_with_context(self):
+        from grokswarm.guardrails import ExternalReviewer
+        assert ExternalReviewer.parse_approval("APPROVED\nLooks good overall") is True
+
+    def test_format_dag_for_review(self):
+        from grokswarm.guardrails import Deliberator
+        from grokswarm.models import TaskDAG, SubTask
+        dag = TaskDAG(goal="build widgets", subtasks=[
+            SubTask(id="t1", description="Create widget A", expert="coder", deliverables=["a.py"]),
+            SubTask(id="t2", description="Create widget B", expert="coder", depends_on=["t1"]),
+        ])
+        text = Deliberator._format_dag_for_review(dag)
+        assert "build widgets" in text
+        assert "t1" in text
+        assert "t2" in text
+        assert "(independent)" in text
+        assert "(depends on: t1)" in text
+        assert "a.py" in text
+        assert "1 independent" in text
+
+    def test_build_review_prompt_no_history(self):
+        from grokswarm.guardrails import ExternalReviewer
+        reviewer = ExternalReviewer(name="Test", cli_command="test")
+        prompt = reviewer.build_review_prompt("plan text", "project summary", "caps", [])
+        assert "plan text" in prompt
+        assert "project summary" in prompt
+        assert "caps" in prompt
+        assert "Prior Deliberation" not in prompt
+        assert "APPROVED" in prompt
+
+    def test_build_review_prompt_with_history(self):
+        from grokswarm.guardrails import ExternalReviewer
+        from grokswarm.models import DeliberationRound
+        reviewer = ExternalReviewer(name="Test", cli_command="test")
+        history = [DeliberationRound(round_num=1, grok_plan="plan1", reviewer_feedback="fix X")]
+        prompt = reviewer.build_review_prompt("plan2", "proj", "caps", history)
+        assert "Prior Deliberation" in prompt
+        assert "Round 1" in prompt
+        assert "plan1" in prompt
+        assert "fix X" in prompt
+
+    def test_record_exchange(self):
+        from grokswarm.guardrails import ExternalReviewer
+        reviewer = ExternalReviewer(name="Test", cli_command="test")
+        assert len(reviewer.history) == 0
+        reviewer.record_exchange(1, "plan", "feedback", False)
+        reviewer.record_exchange(2, "plan2", "APPROVED", True)
+        assert len(reviewer.history) == 2
+        assert reviewer.history[0].approved is False
+        assert reviewer.history[1].approved is True
+        assert reviewer.history[1].round_num == 2
+
+    def test_deliberator_capabilities_not_empty(self):
+        from grokswarm.guardrails import Deliberator
+        assert len(Deliberator.CAPABILITIES) > 50
+        assert "multi-agent" in Deliberator.CAPABILITIES
+
+    def test_deliberation_round_dataclass(self):
+        from grokswarm.models import DeliberationRound
+        r = DeliberationRound(round_num=1, grok_plan="plan", reviewer_feedback="looks good")
+        assert r.round_num == 1
+        assert r.grok_plan == "plan"
+        assert r.reviewer_feedback == "looks good"
+        assert r.approved is False
+
+    def test_dualhead_mode_default(self):
+        from grokswarm.models import SwarmState
+        state = SwarmState()
+        assert state.dualhead_mode is False
