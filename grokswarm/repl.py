@@ -928,27 +928,6 @@ async def _chat_async(session_name: str | None = None):
         return str(n)
 
     def get_bottom_toolbar():
-        # Approval prompt takes over the toolbar
-        ap = shared._pending_approval
-        if ap is not None:
-            prompt = ap["prompt"]
-            default = ap.get("default", True)
-            extra = ap.get("extra_keys")
-            def_y = " (default)" if default else ""
-            def_n = " (default)" if not default else ""
-            lines = [
-                f"  <ansiyellow>{prompt}</ansiyellow>",
-                f"  <ansidarkgray> y </ansidarkgray> approve{def_y}"
-                f"   <ansidarkgray> n </ansidarkgray> reject{def_n}"
-                f"   <ansidarkgray> esc </ansidarkgray> cancel",
-            ]
-            if extra:
-                extra_parts = []
-                for key, label in extra.items():
-                    extra_parts.append(f"<ansidarkgray> {key} </ansidarkgray> {label}")
-                lines.append("  " + "   ".join(extra_parts))
-            return HTML("\n".join(lines))
-
         if shared.state.trust_mode:
             mode_str = "<ansigreen>TRUST</ansigreen>"
         elif shared.state.read_only:
@@ -1149,6 +1128,30 @@ async def _chat_async(session_name: str | None = None):
                 def get_message():
                     _cols = shutil.get_terminal_size((80, 20)).columns
                     line_str = "\u2500" * _cols
+
+                    # Approval prompt replaces the normal input prompt
+                    ap = shared._pending_approval
+                    if ap is not None:
+                        prompt = ap["prompt"]
+                        default = ap.get("default", True)
+                        extra = ap.get("extra_keys")
+                        def_y = " (default)" if default else ""
+                        def_n = " (default)" if not default else ""
+                        parts = [""]
+                        parts.append(f"<style fg='#b08800'>{line_str}</style>")
+                        parts.append(f"  <ansiyellow><b>{prompt}</b></ansiyellow>")
+                        opts = (
+                            f"   <ansidarkgray> y </ansidarkgray> approve{def_y}"
+                            f"   <ansidarkgray> n </ansidarkgray> reject{def_n}"
+                            f"   <ansidarkgray> esc </ansidarkgray> cancel"
+                        )
+                        if extra:
+                            for key, label in extra.items():
+                                opts += f"   <ansidarkgray> {key} </ansidarkgray> {label}"
+                        parts.append(opts)
+                        return HTML("\n".join(parts))
+
+                    # Normal prompt
                     parts = [""]  # blank line for breathing room
                     if shared._toolbar_status and not shared._is_prompt_suspended:
                         icon = shared.THINKING_FRAMES[shared._toolbar_spinner_idx % len(shared.THINKING_FRAMES)]

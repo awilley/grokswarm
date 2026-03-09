@@ -403,17 +403,13 @@ def _toolbar_confirm(prompt_text: str, default: bool = True, extra_keys: dict | 
             except Exception:
                 pass
 
-    # Print dim feedback
-    out = sys.__stdout__
-    dim = "\033[2m"
-    reset = "\033[0m"
+    # Feedback via Rich console (goes through patch_stdout, no rendering fights)
     if result is True:
-        out.write(f"  {dim}> Approved{reset}\n")
+        console.print("  [dim]> Approved[/dim]")
     elif result is False:
-        out.write(f"  {dim}> Rejected{reset}\n")
+        console.print("  [dim]> Rejected[/dim]")
     else:
-        out.write(f"  {dim}> {result}{reset}\n")
-    out.flush()
+        console.print(f"  [dim]> {result}[/dim]")
     return result
 
 
