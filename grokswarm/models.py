@@ -72,6 +72,7 @@ class SwarmState:
     self_improve_active: bool = False
     verbose_mode: bool = False
     vi_mode: bool = False
+    claude_mode: bool = False
     agent_mode: int = 0
     edit_history: list = field(default_factory=list)
     pending_write_count: int = 0

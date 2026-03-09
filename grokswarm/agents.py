@@ -1,6 +1,7 @@
 """SwarmBus, spawning, messaging, run_supervisor, run_expert, cost tracking."""
 
 import json
+import os
 import sys
 import time
 import yaml
@@ -732,6 +733,123 @@ Rules:
             log_exception(e, context_label=f"Expert:{data['name']}({display_name})")
         except Exception:
             pass
+        return f"Error: {e}"
+    finally:
+        shared.state.agent_mode -= 1
+
+
+_CLAUDE_ENV_STRIP = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ACCESS_TOKEN"}
+
+
+async def run_claude_expert(task_desc: str, bus: SwarmBus | None = None,
+                            agent_name: str | None = None,
+                            workspace_dir: Path | None = None,
+                            expert_name: str = "claude",
+                            is_sub_agent: bool = False,
+                            timeout: int = 300,
+                            max_budget_usd: float = 2.0):
+    """Execute an agent task through Claude Code CLI instead of the internal tool loop."""
+    display_name = agent_name or expert_name
+
+    # Set workspace override for branch-isolated agents
+    if workspace_dir:
+        shared._workspace_override.set(workspace_dir)
+        shared.console.print(f"[bold magenta]-> Running Claude Expert:[/bold magenta] {display_name} in worktree {workspace_dir.name}")
+    else:
+        shared.console.print(f"[bold magenta]-> Running Claude Expert:[/bold magenta] {display_name}")
+
+    agent = shared.state.register_agent(display_name, expert_name, task_desc)
+    agent.workspace = workspace_dir
+    shared.state.agent_mode += 1
+
+    _auto_checkpoint_before_agent(display_name)
+    agent.transition(AgentState.THINKING)
+    _agent_start_time = time.monotonic()
+
+    try:
+        cwd = str(workspace_dir) if workspace_dir else str(shared.PROJECT_DIR)
+        cmd = [
+            "claude", "-p",
+            "--output-format", "json",
+            "--dangerously-skip-permissions",
+            "--no-session-persistence",
+            "--max-turns", "25",
+            f"--max-budget-usd", str(max_budget_usd),
+            task_desc,
+        ]
+        env = {k: v for k, v in os.environ.items() if k not in _CLAUDE_ENV_STRIP}
+
+        agent.transition(AgentState.WORKING)
+        loop = asyncio.get_event_loop()
+        proc_result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd, capture_output=True, text=True,
+                                   timeout=timeout, env=env, cwd=cwd),
+        )
+
+        if proc_result.returncode != 0:
+            err = proc_result.stderr.strip() or proc_result.stdout.strip() or "unknown"
+            agent.transition(AgentState.ERROR)
+            report = f"Claude CLI error (exit {proc_result.returncode}): {err}"
+            if bus:
+                bus.post(display_name, report, kind="result")
+            return report
+
+        # Parse JSON output
+        try:
+            data = json.loads(proc_result.stdout)
+        except json.JSONDecodeError:
+            # Plain text fallback
+            result_text = proc_result.stdout
+            data = {}
+        else:
+            result_text = data.get("result", "")
+            if isinstance(result_text, list):
+                result_text = "\n".join(
+                    block.get("text", "") for block in result_text
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+
+        # Track cost
+        cost = data.get("cost_usd") or data.get("costUsd") or 0
+        turns = data.get("num_turns") or data.get("numTurns") or 0
+        if cost:
+            with _cost_lock:
+                shared.state.project_cost_usd += cost
+                shared.state.global_cost_usd += cost
+            agent.cost_usd = cost
+
+        elapsed = time.monotonic() - _agent_start_time
+        report = (
+            f"[Claude Expert: {display_name}] Completed in {elapsed:.1f}s, "
+            f"{turns} turn(s), ${cost:.4f}\n\n{result_text}"
+        )
+
+        # Save memory & post result
+        save_memory(f"claude_{display_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}", report[:2000])
+        if bus:
+            bus.post(display_name, report, kind="result")
+        agent.transition(AgentState.DONE)
+
+        # Terminal bell if agent ran >30s in interactive mode
+        if shared.state.agent_mode <= 1 and elapsed > 30:
+            try:
+                sys.__stdout__.write("\a")
+                sys.__stdout__.flush()
+            except Exception:
+                pass
+
+        return result_text
+
+    except subprocess.TimeoutExpired:
+        agent.transition(AgentState.ERROR)
+        report = f"Claude CLI timed out after {timeout}s"
+        if bus:
+            bus.post(display_name, report, kind="result")
+        return report
+    except Exception as e:
+        agent.transition(AgentState.ERROR)
+        shared.console.print(f"[swarm.error]Claude Expert {display_name} error: {e}[/swarm.error]")
         return f"Error: {e}"
     finally:
         shared.state.agent_mode -= 1

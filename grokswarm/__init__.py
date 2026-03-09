@@ -125,7 +125,7 @@ from grokswarm.agents import (
     _costs_file, _load_project_costs, _save_project_costs, _record_usage, _extract_cached_tokens, _cost_lock,
     EXPERT_DEFAULT_MAX_ROUNDS, _auto_checkpoint_before_agent, _validate_expert_yaml,
     _detect_tech_stack, _build_completion_report,
-    run_supervisor, run_expert,
+    run_supervisor, run_expert, run_claude_expert, _CLAUDE_ENV_STRIP,
     _spawn_agent_impl, _send_message_impl, _check_messages_impl, _list_agents_impl, _wait_for_agent_impl,
     spawn_expert_subprocess,
 )

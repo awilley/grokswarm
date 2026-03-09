@@ -842,6 +842,16 @@ async def handle_vim(arg: str, ctx: CmdContext) -> None:
         shared.console.print("[swarm.accent]Vi mode [bold]OFF[/bold] — standard editing restored[/swarm.accent]")
 
 
+async def handle_claude(arg: str, ctx: CmdContext) -> None:
+    import shutil
+    if not shared.state.claude_mode and not shutil.which("claude"):
+        shared.console.print("[swarm.error]Claude Code CLI not found in PATH. Install it first: https://docs.anthropic.com/en/docs/claude-code[/swarm.error]")
+        return
+    shared.state.claude_mode = not shared.state.claude_mode
+    status = "ON" if shared.state.claude_mode else "OFF"
+    shared.console.print(f"[magenta]Claude Code mode [bold]{status}[/bold] — {'experts route through claude -p' if shared.state.claude_mode else 'back to native GrokSwarm'}[/magenta]")
+
+
 async def handle_daemon(arg: str, ctx: CmdContext) -> None:
     from grokswarm.daemon import start_daemon, stop_daemon, daemon_status, daemon_log, add_watch_pattern
     parts = arg.split() if arg else []

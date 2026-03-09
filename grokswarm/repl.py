@@ -42,7 +42,7 @@ from grokswarm.cmd_handlers import (
     handle_tasks, handle_budget, handle_model, handle_bugs, handle_memory,
     handle_eval, handle_self_improve, handle_daemon, handle_self_eval,
     handle_vim, handle_history, handle_self_scores,
-    handle_diff, handle_copy,
+    handle_diff, handle_copy, handle_claude,
 )
 
 # ---------------------------------------------------------------------------
@@ -100,6 +100,7 @@ _cmd("history",      "Search command history",              aliases=["hist"])(ha
 _cmd("self-scores",  "Show latest eval scores",             aliases=["scores"])(handle_self_scores)
 _cmd("diff",         "Show session file changes as diff")(handle_diff)
 _cmd("copy",         "Copy last response to clipboard")(handle_copy)
+_cmd("claude",       "Toggle Claude Code executor mode")(handle_claude)
 # fmt: on
 
 # -- Context-Aware Tab Completion --
@@ -887,12 +888,13 @@ async def _chat_async(session_name: str | None = None):
         tok_str = _fmt_tokens(shared.state.global_tokens_used)
         cost_str = f"${shared.state.project_cost_usd:.3f}"
         vi_tag = " <ansicyan>[VI]</ansicyan>" if getattr(shared.state, 'vi_mode', False) else ""
+        claude_tag = " <ansimagenta>[CLAUDE]</ansimagenta>" if getattr(shared.state, 'claude_mode', False) else ""
         parts.append(
             f"  <ansidarkgray>{proj_name}</ansidarkgray>"
             f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{model_short}</ansidarkgray>"
             f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{tok_str} tok</ansidarkgray>"
             f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{cost_str}</ansidarkgray>"
-            f"{ctx_tag}{vi_tag}"
+            f"{ctx_tag}{vi_tag}{claude_tag}"
             f" <ansidarkgray>|</ansidarkgray> <ansimagenta>\u25b6\u25b6</ansimagenta> {mode_str}"
         )
         return HTML("\n".join(parts))
@@ -902,6 +904,65 @@ async def _chat_async(session_name: str | None = None):
         return HTML(f"{' ' * spaces}<ansidarkgray>\u00b7 </ansidarkgray>")
 
     _toolbar_spinner_task = asyncio.create_task(_spinner_tick())
+
+    async def _run_claude_prompt(text: str, conversation: list) -> None:
+        """Route a prompt through Claude Code CLI and display the result."""
+        import subprocess as _sp
+        from grokswarm.agents import _cost_lock, _CLAUDE_ENV_STRIP
+        shared._set_status("Claude is thinking...")
+        try:
+            cmd = [
+                "claude", "-p",
+                "--output-format", "json",
+                "--dangerously-skip-permissions",
+                "--no-session-persistence",
+                text,
+            ]
+            env = {k: v for k, v in os.environ.items() if k not in _CLAUDE_ENV_STRIP}
+            loop = asyncio.get_event_loop()
+            proc_result = await loop.run_in_executor(
+                None,
+                lambda: _sp.run(cmd, capture_output=True, text=True, timeout=300, env=env,
+                                cwd=str(shared.PROJECT_DIR)),
+            )
+            if proc_result.returncode != 0:
+                err = proc_result.stderr.strip() or proc_result.stdout.strip() or "unknown error"
+                shared.console.print(f"[swarm.error]Claude CLI error (exit {proc_result.returncode}): {err}[/swarm.error]")
+                return
+            import json as _json
+            try:
+                data = _json.loads(proc_result.stdout)
+            except _json.JSONDecodeError:
+                # Not JSON — treat as plain text
+                shared.console.print(proc_result.stdout)
+                conversation.append({"role": "assistant", "content": proc_result.stdout})
+                return
+            # Extract result text
+            result = data.get("result", "")
+            if isinstance(result, list):
+                result = "\n".join(
+                    block.get("text", "") for block in result
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+            # Display via Rich Markdown
+            from rich.markdown import Markdown
+            shared.console.print(Markdown(result))
+            conversation.append({"role": "assistant", "content": result})
+            # Track cost
+            cost = data.get("cost_usd") or data.get("costUsd") or 0
+            turns = data.get("num_turns") or data.get("numTurns") or 0
+            if cost:
+                with _cost_lock:
+                    shared.state.project_cost_usd += cost
+                    shared.state.global_cost_usd += cost
+            if turns:
+                shared.console.print(f"[dim]Claude: {turns} turn(s), ${cost:.4f}[/dim]")
+        except _sp.TimeoutExpired:
+            shared.console.print("[swarm.error]Claude CLI timed out after 300s[/swarm.error]")
+        except FileNotFoundError:
+            shared.console.print("[swarm.error]Claude CLI not found in PATH[/swarm.error]")
+        finally:
+            shared._clear_status()
 
     async def _process_input_queue():
         nonlocal conversation, processing_busy
@@ -913,7 +974,8 @@ async def _chat_async(session_name: str | None = None):
             shared._cancel_event.clear()
             try:
                 text = shared._sanitize_surrogates(user_input)
-                if shared._pending_images:
+                has_images = bool(shared._pending_images)
+                if has_images:
                     content = [{"type": "text", "text": text}]
                     for uri in shared._pending_images:
                         content.append({"type": "image_url", "image_url": {"url": uri, "detail": "auto"}})
@@ -923,7 +985,10 @@ async def _chat_async(session_name: str | None = None):
                     conversation.append({"role": "user", "content": text})
                 conversation = await _trim_conversation(conversation)
                 shared.state.request_auto_approve = False
-                await _stream_with_tools(conversation)
+                if shared.state.claude_mode and not has_images:
+                    await _run_claude_prompt(text, conversation)
+                else:
+                    await _stream_with_tools(conversation)
                 if session_name:
                     save_session(session_name, conversation)
             except KeyboardInterrupt:

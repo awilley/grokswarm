@@ -480,7 +480,7 @@ RULES:
         agent batch gets its own git worktree (branch). After agents complete,
         their branches are merged back into the main branch.
         """
-        from grokswarm.agents import run_expert
+        from grokswarm.agents import run_expert, run_claude_expert
         from grokswarm.registry_helpers import list_experts
         from grokswarm.tools_git import git_worktree_add, git_worktree_remove, _run_git
 
@@ -549,14 +549,24 @@ RULES:
                     else:
                         notify(f"Orchestrator: [{subtask.id}] worktree failed ({worktree_result}), running in shared workspace", level="warning")
 
-                task_coro = run_expert(
-                    subtask.expert,
-                    full_desc,
-                    agent_name=agent_name,
-                    bus=bus,
-                    workspace_dir=workspace,
-                    is_sub_agent=True,
-                )
+                if shared.state.claude_mode:
+                    task_coro = run_claude_expert(
+                        task_desc=full_desc,
+                        bus=bus,
+                        agent_name=agent_name,
+                        workspace_dir=workspace,
+                        expert_name=subtask.expert,
+                        is_sub_agent=True,
+                    )
+                else:
+                    task_coro = run_expert(
+                        subtask.expert,
+                        full_desc,
+                        agent_name=agent_name,
+                        bus=bus,
+                        workspace_dir=workspace,
+                        is_sub_agent=True,
+                    )
                 tasks.append((subtask, asyncio.create_task(task_coro)))
 
             # Wait for this batch to complete
