@@ -679,6 +679,8 @@ async def _chat_async(session_name: str | None = None):
         buf = event.current_buffer
         if buf.complete_state:
             buf.cancel_completion()
+        elif processing_busy:
+            shared._cancel_event.set()
         elif buf.text:
             buf.document = Document('')
 
@@ -808,6 +810,7 @@ async def _chat_async(session_name: str | None = None):
             if user_input is None:
                 break
             processing_busy = True
+            shared._cancel_event.clear()
             try:
                 conversation.append({"role": "user", "content": shared._sanitize_surrogates(user_input)})
                 conversation = await _trim_conversation(conversation)
@@ -821,6 +824,7 @@ async def _chat_async(session_name: str | None = None):
                 shared.console.print(f"[swarm.error]Error: {e}[/swarm.error]")
             finally:
                 processing_busy = False
+                shared._cancel_event.clear()
                 shared._clear_status()
 
     processor_task = asyncio.create_task(_process_input_queue())

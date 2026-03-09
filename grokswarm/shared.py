@@ -56,6 +56,9 @@ _saved_prompt_text = ""
 _is_prompt_suspended = False
 _suspend_lock = asyncio.Lock()
 
+# Escape-key cancellation flag (checked by streaming/tool loops)
+_cancel_event = asyncio.Event()
+
 
 def _set_status(text: str):
     global _toolbar_status, _toolbar_spinner_idx

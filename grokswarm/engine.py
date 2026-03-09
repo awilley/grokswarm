@@ -491,6 +491,9 @@ async def _stream_with_tools(conversation: list) -> str:
     total_completion_tokens = 0
     xai_tools = llm.convert_tools(TOOL_SCHEMAS)
     for _round in range(MAX_TOOL_ROUNDS):
+        if shared._cancel_event.is_set():
+            shared.console.print("\n  [swarm.warning]\u23ce Interrupted.[/swarm.warning]")
+            return full_response
         full_response = ""
         collected_tool_calls = []
         finish_reason = None
@@ -518,11 +521,19 @@ async def _stream_with_tools(conversation: list) -> str:
                 # xai-sdk streaming: tool calls arrive complete (no incremental accumulation)
                 async with asyncio.timeout(STREAM_TIMEOUT_SEC):
                     async for response, chunk in _chat.stream():
+                        if shared._cancel_event.is_set():
+                            break
                         stream_response = response
                         if chunk.content:
                             full_response += chunk.content
                         for tc in chunk.tool_calls:
                             collected_tool_calls.append(tc)
+                if shared._cancel_event.is_set():
+                    shared.console.print("\n  [swarm.warning]\u23ce Interrupted.[/swarm.warning]")
+                    shared._clear_status()
+                    if full_response:
+                        conversation.append({"role": "assistant", "content": full_response})
+                    return full_response
                 break
             except KeyboardInterrupt:
                 raise
@@ -665,6 +676,13 @@ async def _stream_with_tools(conversation: list) -> str:
                     shared._set_status(f"working on: {_seq_names}")
                 try:
                     for tc, name, args in parsed_tools:
+                        if shared._cancel_event.is_set():
+                            conversation.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "content": "Cancelled: interrupted by user.",
+                            })
+                            continue
                         detail = _tool_detail(name, args)
                         if shared.state.verbose_mode:
                             shared.console.print(f"  [swarm.accent]\u26a1 {name}[/swarm.accent][dim]{detail}[/dim]")
