@@ -820,9 +820,41 @@ def _load_skill_tools():
             pass
 
 
+def _load_plugins():
+    """Load user plugins from ~/.grokswarm/plugins/.
+
+    Each .py file can define:
+      TOOLS: list[dict]  — tool schemas (same format as TOOL_SCHEMAS entries)
+      HANDLERS: dict[str, callable]  — {tool_name: handler_func}
+      READ_ONLY: set[str]  — tool names that are read-only (optional)
+    """
+    import importlib.util
+    for f in sorted(shared.PLUGINS_DIR.glob("*.py")):
+        try:
+            spec = importlib.util.spec_from_file_location(f"grokswarm_plugin_{f.stem}", f)
+            if spec is None or spec.loader is None:
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            tools = getattr(mod, "TOOLS", [])
+            handlers = getattr(mod, "HANDLERS", {})
+            ro = getattr(mod, "READ_ONLY", set())
+            for schema in tools:
+                name = schema.get("function", {}).get("name", "")
+                if name and not any(t.get("function", {}).get("name") == name for t in TOOL_SCHEMAS):
+                    TOOL_SCHEMAS.append(schema)
+            for name, handler in handlers.items():
+                TOOL_DISPATCH[name] = handler
+            READ_ONLY_TOOLS.update(ro)
+            shared._log(f"plugin loaded: {f.stem} ({len(tools)} tools)")
+        except Exception as e:
+            shared.console.print(f"[swarm.warning]Plugin {f.name} failed to load: {e}[/swarm.warning]")
+
+
 # Initialize on import
 seed_defaults()
 _load_skill_tools()
+_load_plugins()
 
 from grokswarm.tools_mcp import register_mcp_tools
 register_mcp_tools()

@@ -12,7 +12,7 @@ from grokswarm.shared import (
     XAI_API_KEY, VERSION, MODEL, BASE_URL, MAX_TOKENS, CODE_MODEL,
     MODEL_PRICING, _get_pricing,
     PROJECT_DIR, PROJECT_CONTEXT, SYSTEM_PROMPT,
-    GROKSWARM_HOME, SKILLS_DIR, EXPERTS_DIR, TEAMS_DIR, MEMORY_DIR,
+    GROKSWARM_HOME, SKILLS_DIR, EXPERTS_DIR, TEAMS_DIR, MEMORY_DIR, PLUGINS_DIR,
     SESSIONS_DIR, CONTEXT_CACHE_DIR, _RECENT_PROJECTS_FILE,
     _background_tasks, _bus_instance, _agent_counter,
     _input_queue, _drain_input_queue,
@@ -89,7 +89,7 @@ from grokswarm.tools_registry import (
     TOOL_SCHEMAS, TOOL_DISPATCH, READ_ONLY_TOOLS,
     _FILE_MUTATION_TOOLS, _READONLY_BLOCKED_TOOLS,
     AGENT_TOOL_SCHEMAS, get_agent_tool_schemas,
-    _invoke_skill, _register_skill_tool, _load_skill_tools,
+    _invoke_skill, _register_skill_tool, _load_skill_tools, _load_plugins,
 )
 
 # -- bugs --
