@@ -41,7 +41,7 @@ from grokswarm.cmd_handlers import (
     handle_peek, handle_pause, handle_resume, handle_approve, handle_reject,
     handle_tasks, handle_budget, handle_model, handle_bugs, handle_memory,
     handle_eval, handle_self_improve, handle_daemon, handle_self_eval,
-    handle_vim, handle_history,
+    handle_vim, handle_history, handle_self_scores,
 )
 
 # ---------------------------------------------------------------------------
@@ -96,6 +96,7 @@ _cmd("daemon",       "File watcher daemon (auto-test)")(handle_daemon)
 _cmd("self-eval",    "Eval -> fix -> re-eval loop",         allow_while_busy=False)(handle_self_eval)
 _cmd("vim",          "Toggle vi editing mode")(handle_vim)
 _cmd("history",      "Search command history",              aliases=["hist"])(handle_history)
+_cmd("self-scores",  "Show latest eval scores",             aliases=["scores"])(handle_self_scores)
 # fmt: on
 
 # -- Context-Aware Tab Completion --

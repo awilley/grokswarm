@@ -819,3 +819,131 @@ async def handle_daemon(arg: str, ctx: CmdContext) -> None:
         shared.console.print(f"[swarm.accent]{result}[/swarm.accent]")
     else:
         shared.console.print("[swarm.dim]Usage: /daemon [start|stop|status|log|add <pattern>][/swarm.dim]")
+
+
+async def handle_self_scores(arg: str, ctx: CmdContext) -> None:
+    from rich.table import Table
+    from pathlib import Path as _Path
+
+    scores_path = _Path(".grokswarm") / "eval_scores.json"
+    scores: dict = {}
+    if scores_path.exists():
+        try:
+            scores = json.loads(scores_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Build task catalog from both eval modules
+    all_tasks: dict[str, dict] = {}
+    try:
+        from eval_deep import DEEP_EVAL_TASKS
+        for t in DEEP_EVAL_TASKS:
+            all_tasks[t.id] = {"category": t.category, "description": t.description}
+    except ImportError:
+        pass
+    try:
+        from eval_deep_v2 import V2_EVAL_TASKS
+        for t in V2_EVAL_TASKS:
+            all_tasks[t.id] = {"category": t.category, "description": t.description}
+    except ImportError:
+        pass
+
+    # Include any tasks in scores that aren't in the catalog
+    for tid, data in scores.items():
+        if tid not in all_tasks:
+            all_tasks[tid] = {"category": data.get("category", "?"), "description": data.get("description", "")}
+
+    task_id = arg.strip() if arg else ""
+
+    if task_id:
+        # Detailed view for a single task
+        if task_id not in scores:
+            info = all_tasks.get(task_id)
+            if info:
+                shared.console.print(f"[swarm.dim]Task {task_id} ({info['description']}) — not yet run.[/swarm.dim]")
+            else:
+                shared.console.print(f"[swarm.warning]Unknown task: {task_id}[/swarm.warning]")
+            return
+        d = scores[task_id]
+        shared.console.print(f"\n[bold cyan]{task_id}[/bold cyan] — {d.get('description', '')}")
+        shared.console.print(f"  [bold]Category:[/bold]  {d.get('category', '?')}")
+        shared.console.print(f"  [bold]Verdict:[/bold]   {d.get('verdict', '?')}")
+        shared.console.print(f"  [bold]Updated:[/bold]   {d.get('updated', '?')}")
+        shared.console.print()
+        shared.console.print(f"  [bold]Single:[/bold]  quality={d.get('single_quality', 0):.0%}  "
+                             f"cost=${d.get('single_cost_usd', 0):.4f}  time={d.get('single_time_s', 0):.1f}s")
+        shared.console.print(f"           cost$={d.get('single_cost_score', 0):.0%}  "
+                             f"time$={d.get('single_time_score', 0):.0%}  "
+                             f"overall={d.get('single_overall', 0):.0%}")
+        if d.get("swarm_quality", 0) > 0 or d.get("swarm_cost_score", 0) > 0:
+            shared.console.print(f"  [bold]Swarm:[/bold]   quality={d.get('swarm_quality', 0):.0%}  "
+                                 f"cost=${d.get('swarm_cost_usd', 0):.4f}  time={d.get('swarm_time_s', 0):.1f}s")
+            shared.console.print(f"           cost$={d.get('swarm_cost_score', 0):.0%}  "
+                                 f"time$={d.get('swarm_time_score', 0):.0%}  "
+                                 f"overall={d.get('swarm_overall', 0):.0%}")
+        # Check details
+        for label, key in [("Single", "single_checks"), ("Swarm", "swarm_checks")]:
+            checks = d.get(key, [])
+            if checks:
+                shared.console.print(f"\n  [{label}] Checks:")
+                for c in checks:
+                    status = "[green]PASS[/green]" if c.get("passed") else "[red]FAIL[/red]"
+                    shared.console.print(f"    {status} {c.get('check', '?')} "
+                                         f"({c.get('category', '?')} w={c.get('weight', 0):.1f}): "
+                                         f"{str(c.get('message', ''))[:60]}")
+        shared.console.print()
+        return
+
+    # Summary table — all known tasks
+    updated = ""
+    for d in scores.values():
+        u = d.get("updated", "")
+        if u > updated:
+            updated = u
+    title = "GROKSWARM EVAL SCORES"
+    if updated:
+        title += f" (last updated: {updated[:10]})"
+
+    tbl = Table(title=title, show_header=True, header_style="bold", border_style="dim")
+    tbl.add_column("Task", width=6)
+    tbl.add_column("Cat", width=4)
+    tbl.add_column("Description", ratio=1)
+    tbl.add_column("S.Qual", width=7, justify="right")
+    tbl.add_column("S.Cost$", width=7, justify="right")
+    tbl.add_column("S.Time$", width=7, justify="right")
+    tbl.add_column("S.Over", width=7, justify="right")
+    tbl.add_column("|", width=1)
+    tbl.add_column("W.Qual", width=7, justify="right")
+    tbl.add_column("W.Cost$", width=7, justify="right")
+    tbl.add_column("W.Time$", width=7, justify="right")
+    tbl.add_column("W.Over", width=7, justify="right")
+    tbl.add_column("Verdict", width=12)
+
+    for tid in sorted(all_tasks.keys()):
+        info = all_tasks[tid]
+        d = scores.get(tid)
+        if d:
+            def _f(v): return f"{v:.0%}" if isinstance(v, (int, float)) else "--"
+            verdict = d.get("verdict", "?").replace("_", " ").title()
+            has_swarm = d.get("swarm_quality", 0) > 0 or d.get("swarm_cost_score", 0) > 0
+            tbl.add_row(
+                tid, info["category"], info["description"][:30],
+                _f(d.get("single_quality")), _f(d.get("single_cost_score")),
+                _f(d.get("single_time_score")), _f(d.get("single_overall")),
+                "|",
+                _f(d.get("swarm_quality")) if has_swarm else "--",
+                _f(d.get("swarm_cost_score")) if has_swarm else "--",
+                _f(d.get("swarm_time_score")) if has_swarm else "--",
+                _f(d.get("swarm_overall")) if has_swarm else "--",
+                verdict,
+            )
+        else:
+            tbl.add_row(
+                tid, info["category"], info["description"][:30],
+                "--", "--", "--", "--", "|",
+                "--", "--", "--", "--", "(not run)",
+            )
+
+    shared.console.print()
+    shared.console.print(tbl)
+    shared.console.print()
