@@ -951,6 +951,7 @@ class Deliberator:
 
         for round_num in range(1, self.MAX_ROUNDS + 1):
             notify(f"Deliberation round {round_num}/{self.MAX_ROUNDS}")
+            shared._set_status(f"dualhead deliberating... round {round_num}/{self.MAX_ROUNDS}")
             shared.console.print(
                 f"\n[bold green]\\[Grok → {self.reviewer.name}][/bold green] "
                 f"Round {round_num} — sending plan for review..."
@@ -964,6 +965,10 @@ class Deliberator:
 
             approved = ExternalReviewer.parse_approval(feedback)
             self.reviewer.record_exchange(round_num, plan_text, feedback, approved)
+            # Persist to global log so /delib can display it
+            rnd = DeliberationRound(round_num=round_num, grok_plan=plan_text,
+                                    reviewer_feedback=feedback, approved=approved)
+            shared.state.deliberation_log.append(rnd)
 
             label = "APPROVED" if approved else "FEEDBACK"
             color = "green" if approved else "yellow"
@@ -975,12 +980,15 @@ class Deliberator:
             shared.console.print(f"[dim]{display_fb}[/dim]")
 
             if approved:
+                shared._clear_status()
                 notify(f"Deliberation: plan approved in round {round_num}")
                 return dag
 
+            shared._set_status(f"dualhead deliberating... revising plan")
             dag = await self._revise_plan(task, dag, feedback)
             plan_text = self._format_dag_for_review(dag)
 
+        shared._clear_status()
         notify("Deliberation: max rounds reached, proceeding with latest plan")
         return dag
 
@@ -1619,6 +1627,7 @@ class GuardrailPipeline:
         )
 
         notify(f"Dualhead: sending {self.display_name}'s plan to Claude for review")
+        shared._set_status(f"dualhead deliberating... reviewing {self.display_name}")
         shared.console.print(
             f"\n[bold green]\\[Grok → Claude][/bold green] "
             f"Reviewing {self.display_name}'s plan..."
@@ -1626,6 +1635,11 @@ class GuardrailPipeline:
 
         feedback = await reviewer.review(prompt)
         approved = ExternalReviewer.parse_approval(feedback)
+        # Persist to global log so /delib can display it
+        rnd = DeliberationRound(round_num=1, grok_plan=formatted,
+                                reviewer_feedback=feedback, approved=approved)
+        shared.state.deliberation_log.append(rnd)
+        shared._clear_status()
 
         label = "APPROVED" if approved else "FEEDBACK"
         color = "green" if approved else "yellow"

@@ -42,7 +42,7 @@ from grokswarm.cmd_handlers import (
     handle_tasks, handle_budget, handle_model, handle_bugs, handle_memory,
     handle_eval, handle_self_improve, handle_daemon, handle_self_eval,
     handle_vim, handle_history, handle_self_scores,
-    handle_diff, handle_copy, handle_claude,
+    handle_diff, handle_copy, handle_claude, handle_delib,
 )
 
 # ---------------------------------------------------------------------------
@@ -101,6 +101,7 @@ _cmd("self-scores",  "Show latest eval scores",             aliases=["scores"])(
 _cmd("diff",         "Show session file changes as diff")(handle_diff)
 _cmd("copy",         "Copy last response to clipboard")(handle_copy)
 _cmd("claude",       "Toggle Claude Code executor mode")(handle_claude)
+_cmd("delib",        "View dualhead deliberation log",    aliases=["deliberation"])(handle_delib)
 # fmt: on
 
 # -- Context-Aware Tab Completion --
@@ -127,6 +128,7 @@ class SwarmCompleter(Completer):
     MEMORY_SUBCMDS = ["list", "prune"]
     DAEMON_SUBCMDS = ["start", "stop", "status", "log", "add"]
     CLAUDE_SUBCMDS = ["dualhead"]
+    DELIB_SUBCMDS = ["all", "clear"]
 
     # Class-level attribute — populated after class definition
     SLASH_COMMANDS: dict[str, str] = {}
@@ -189,6 +191,11 @@ class SwarmCompleter(Completer):
         elif cmd == "claude":
             if not arg_text.endswith(" "):
                 for sc in self.CLAUDE_SUBCMDS:
+                    if sc.startswith(arg_text.lower()):
+                        yield Completion(sc, start_position=-len(arg_text))
+        elif cmd in ("delib", "deliberation"):
+            if not arg_text.endswith(" "):
+                for sc in self.DELIB_SUBCMDS:
                     if sc.startswith(arg_text.lower()):
                         yield Completion(sc, start_position=-len(arg_text))
         elif cmd == "project":

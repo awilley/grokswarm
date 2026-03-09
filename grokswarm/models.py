@@ -75,6 +75,7 @@ class SwarmState:
     claude_mode: bool = False
     dualhead_mode: bool = False
     agent_mode: int = 0
+    deliberation_log: list = field(default_factory=list)  # list[DeliberationRound]
     edit_history: list = field(default_factory=list)
     pending_write_count: int = 0
     last_edited_file: str | None = None

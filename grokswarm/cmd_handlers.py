@@ -867,6 +867,39 @@ async def handle_claude(arg: str, ctx: CmdContext) -> None:
     shared.console.print(f"[magenta]Claude Code mode [bold]{status}[/bold] — {'experts route through claude -p' if shared.state.claude_mode else 'back to native GrokSwarm'}[/magenta]")
 
 
+async def handle_delib(arg: str, ctx: CmdContext) -> None:
+    from rich.panel import Panel
+    log = shared.state.deliberation_log
+    if not log:
+        shared.console.print("[swarm.dim]No deliberation rounds yet. Enable with /claude dualhead[/swarm.dim]")
+        return
+    subcmd = arg.strip().lower() if arg else ""
+    if subcmd == "clear":
+        shared.state.deliberation_log.clear()
+        shared.console.print("[swarm.accent]Deliberation log cleared.[/swarm.accent]")
+        return
+    # Show specific round or last round
+    if subcmd.isdigit():
+        idx = int(subcmd) - 1
+        rounds = [log[idx]] if 0 <= idx < len(log) else []
+        if not rounds:
+            shared.console.print(f"[swarm.error]Round {subcmd} not found (have {len(log)} rounds)[/swarm.error]")
+            return
+    elif subcmd == "all":
+        rounds = log
+    else:
+        rounds = [log[-1]]  # default: show latest
+    for rnd in rounds:
+        status = "[bold green]APPROVED[/bold green]" if rnd.approved else "[bold yellow]REJECTED[/bold yellow]"
+        shared.console.print(Panel(
+            f"[bold]Grok's Plan:[/bold]\n{rnd.grok_plan[:2000]}\n\n"
+            f"[bold]Claude's Review:[/bold]\n{rnd.reviewer_feedback[:2000]}",
+            title=f"Deliberation Round {rnd.round_num} — {status}",
+            border_style="magenta",
+        ))
+    shared.console.print(f"[swarm.dim]{len(log)} total rounds | /delib all | /delib <N> | /delib clear[/swarm.dim]")
+
+
 async def handle_daemon(arg: str, ctx: CmdContext) -> None:
     from grokswarm.daemon import start_daemon, stop_daemon, daemon_status, daemon_log, add_watch_pattern
     parts = arg.split() if arg else []
