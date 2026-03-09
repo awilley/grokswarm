@@ -1418,7 +1418,17 @@ def main():
     parser.add_argument("--live", action="store_true", help="Run with real API calls")
     parser.add_argument("--task", nargs="*", help="Specific task IDs (e.g., R1 K2)")
     parser.add_argument("--list", action="store_true", help="List available V2 eval tasks")
+    parser.add_argument("--claude", action="store_true",
+                        help="Route agent execution through Claude Code CLI")
     args = parser.parse_args()
+
+    if args.claude:
+        import shutil
+        if not shutil.which("claude"):
+            print("Error: Claude Code CLI not found in PATH")
+            sys.exit(1)
+        shared.state.claude_mode = True
+        print("Claude Code mode: ON — agents will execute via claude -p")
 
     if args.list:
         print(f"{'ID':<8} {'Cat':>4} {'Checks':>7} {'Rounds':>7} {'Expert':<10} Description")

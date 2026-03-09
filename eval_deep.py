@@ -2559,6 +2559,8 @@ def main():
     parser.add_argument("--list", action="store_true", help="List available deep eval tasks")
     parser.add_argument("--runs", type=int, default=1,
                         help="Number of runs per task for statistical eval (default 1)")
+    parser.add_argument("--claude", action="store_true",
+                        help="Route agent execution through Claude Code CLI")
     args = parser.parse_args()
 
     if args.list:
@@ -2568,6 +2570,14 @@ def main():
             swarm = "Yes" if t.use_swarm else "No"
             print(f"{t.id:<8} {t.category:>4} {len(t.checks):>7} {swarm:>6} {t.expert:<10} {t.description}")
         return
+
+    if args.claude:
+        import shutil
+        if not shutil.which("claude"):
+            print("Error: Claude Code CLI not found in PATH")
+            sys.exit(1)
+        shared.state.claude_mode = True
+        print("Claude Code mode: ON — agents will execute via claude -p")
 
     if args.live:
         task_ids = args.task if args.task else None
