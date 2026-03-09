@@ -438,7 +438,7 @@ def _tool_detail(name: str, args: dict) -> str:
 
 
 async def _stream_with_tools(conversation: list) -> str:
-    from grokswarm.agents import _record_usage
+    from grokswarm.agents import _record_usage, _extract_cached_tokens
     full_response = ""
     total_prompt_tokens = 0
     total_completion_tokens = 0

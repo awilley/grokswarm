@@ -16,7 +16,9 @@
       "Bash(cd /d/work/grokswarm && echo \"\" | python -c \"\nimport sys\nsys.path.insert\\(0, '.'\\)\nimport os\nos.environ['XAI_API_KEY'] = 'test'\nimport grokswarm.shared as shared\nresult = shared._terminal_confirm\\('[bold yellow]Approve TUI screenshot?[/bold yellow]', default=True\\)\nprint\\(f'Result: {result}'\\)\n\" 2>&1)",
       "Bash(python:*)",
       "Bash(timeout 30 python:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
