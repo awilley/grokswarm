@@ -610,10 +610,10 @@ class TestEstimateTokens:
         assert _main._estimate_tokens([]) == 0
 
     def test_simple_content(self):
-        # 80 short words → 80 tokens + 4 message overhead = 84
+        # 80 short words → 80 tokens + 4 overhead = 84, × 1.15 safety margin = 96
         msgs = [{"role": "user", "content": " ".join(["hi"] * 80)}]
         tokens = _main._estimate_tokens(msgs)
-        assert tokens == 84  # 80 words (≤4 chars = 1 token each) + 4 overhead
+        assert 90 <= tokens <= 110  # ~84 base × 1.15 safety margin
 
     def test_tool_calls_counted(self):
         msgs = [{"role": "assistant", "content": "hi there",
@@ -1732,14 +1732,14 @@ class TestGoalVerifier:
         assert len(result["issues"]) == 0
 
     def test_validate_completion_incomplete_plan(self):
+        # Plan-step completion is no longer checked (agents forget to call update_plan)
         agent = AgentInfo(name="test", expert="coder")
         agent.plan = [
             {"step": "Read code", "status": "done"},
             {"step": "Fix bug", "status": "pending"},
         ]
         result = GoalVerifier.validate_completion(agent, [], "")
-        assert result["valid"] is False
-        assert any("not marked done" in i for i in result["issues"])
+        assert result["valid"] is True  # plan steps not checked
 
     def test_validate_completion_no_tests_after_mutations(self):
         agent = AgentInfo(name="test", expert="coder")

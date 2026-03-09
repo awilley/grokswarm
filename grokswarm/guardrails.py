@@ -462,9 +462,16 @@ RULES:
                 subtask.status = "running"
                 agent_name = f"{subtask.expert}_{subtask.id}"
                 subtask.agent_name = agent_name
+                # Prepend results from dependency tasks so agent has context
+                dep_context = ""
+                for dep_id in (subtask.depends_on or []):
+                    dep_task = dag.get_task(dep_id) if hasattr(dag, 'get_task') else None
+                    if dep_task and getattr(dep_task, 'result_summary', None):
+                        dep_context += f"\n[Prior result from {dep_id}]: {dep_task.result_summary}\n"
+                full_desc = dep_context + subtask.description if dep_context else subtask.description
                 task_coro = run_expert(
                     subtask.expert,
-                    subtask.description,
+                    full_desc,
                     agent_name=agent_name,
                     bus=bus
                 )

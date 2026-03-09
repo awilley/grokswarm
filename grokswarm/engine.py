@@ -84,7 +84,8 @@ def _estimate_tokens(messages: list) -> int:
             for tc in m["tool_calls"]:
                 args = tc.get("function", {}).get("arguments", "")
                 total += _estimate_tokens_text(args) + 10  # tool call overhead
-    return total
+    # Safety margin: code/JSON is denser than English text (~3 chars/token vs 4)
+    return int(total * 1.15)
 
 
 def _repair_json(raw: str) -> str:
