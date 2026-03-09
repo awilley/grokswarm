@@ -360,7 +360,11 @@ async def _execute_tool(name: str, args: dict, timed: bool = False):
                 result = await handler(args)
             else:
                 # Sync handler — may still return a coroutine if it's a lambda wrapping async
-                if is_threadable or shared._is_prompt_suspended:
+                _toolbar_ok = (
+                    shared._toolbar_app_ref
+                    and getattr(shared._toolbar_app_ref, 'is_running', False)
+                )
+                if is_threadable or shared._is_prompt_suspended or _toolbar_ok:
                     result = await asyncio.to_thread(handler, args)
                 else:
                     shared._clear_status()
