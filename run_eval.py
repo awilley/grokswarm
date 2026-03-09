@@ -1,8 +1,23 @@
 """Run live eval tasks by category. Usage: python run_eval.py [A|B|C|D|all]"""
-import asyncio
+import os
 import sys
+
+# Force UTF-8 on Windows to handle emoji in API responses
+os.environ["PYTHONUTF8"] = "1"
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+import asyncio
 import tempfile
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env BEFORE importing eval_grokswarm (which sets a test key fallback)
+load_dotenv()
 
 from eval_grokswarm import EVAL_TASKS, run_eval_task_live, format_report
 

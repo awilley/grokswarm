@@ -182,10 +182,12 @@ class LoopDetector:
 
     def check_loop(self) -> str | None:
         """Returns escalation message if a loop is detected, None otherwise."""
-        # Pattern 1: Same file edited many times WITH test failures
-        # Threshold is 6 edits (refactoring legitimately touches the same file),
-        # but drops to 4 if there are test failures (likely stuck in fix loop).
-        edit_threshold = 4 if self.test_failures else 6
+        # Pattern 1: Same file edited many times
+        # Agents legitimately edit files 5-6 times during normal work
+        # (write, fix syntax, refactor, update tests). Threshold is 8 for
+        # exploratory edits, but drops to 5 if there are test failures
+        # (likely stuck in a fix loop).
+        edit_threshold = 5 if self.test_failures else 8
         for path, count in self.edit_targets.items():
             if count >= edit_threshold:
                 return (

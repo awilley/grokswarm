@@ -18,7 +18,8 @@
       "Bash(timeout 30 python:*)",
       "Bash(grep:*)",
       "Bash(ls:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(PYTHONUTF8=1 python:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
