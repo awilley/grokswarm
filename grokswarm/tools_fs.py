@@ -83,8 +83,12 @@ def write_file(path: str, content: str):
         shared.console.print(f"[bold yellow]About to WRITE to:[/bold yellow] {full_path}")
         if full_path.is_file():
             try:
+                raw = full_path.read_bytes()[:8192]
+                if b"\x00" in raw:
+                    shared.console.print(f"[dim]Binary file ({len(full_path.read_bytes())} bytes), diff skipped.[/dim]")
+                    raise ValueError("binary")
                 from rich.syntax import Syntax
-                current = full_path.read_text(encoding="utf-8", errors="ignore")
+                current = full_path.read_text(encoding="utf-8", errors="replace")
                 diff_lines = list(difflib.unified_diff(
                     current.splitlines(), content.splitlines(),
                     fromfile="current", tofile="new", lineterm=""))

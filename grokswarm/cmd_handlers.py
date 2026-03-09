@@ -1100,12 +1100,18 @@ async def handle_copy(arg: str, ctx: CmdContext) -> None:
     try:
         if os.name == "nt":
             proc = subprocess.Popen(["clip.exe"], stdin=subprocess.PIPE)
-            proc.communicate(last_text.encode("utf-16-le"))
-        else:
-            # macOS or Linux
-            cmd = "pbcopy" if sys.platform == "darwin" else "xclip -selection clipboard"
-            proc = subprocess.Popen(cmd.split(), stdin=subprocess.PIPE)
             proc.communicate(last_text.encode("utf-8"))
-        shared.console.print(f"[swarm.accent]Copied {len(last_text)} chars to clipboard.[/swarm.accent]")
+        elif sys.platform == "darwin":
+            proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
+            proc.communicate(last_text.encode("utf-8"))
+        else:
+            proc = subprocess.Popen(["xclip", "-selection", "clipboard"], stdin=subprocess.PIPE)
+            proc.communicate(last_text.encode("utf-8"))
+        if proc.returncode != 0:
+            shared.console.print(f"[swarm.error]Clipboard tool exited with code {proc.returncode}[/swarm.error]")
+        else:
+            shared.console.print(f"[swarm.accent]Copied {len(last_text)} chars to clipboard.[/swarm.accent]")
+    except FileNotFoundError:
+        shared.console.print("[swarm.error]Clipboard tool not found (clip.exe/pbcopy/xclip).[/swarm.error]")
     except Exception as e:
         shared.console.print(f"[swarm.error]Clipboard error: {e}[/swarm.error]")

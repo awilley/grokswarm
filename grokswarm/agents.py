@@ -702,10 +702,14 @@ Rules:
         if bus:
             bus.post(display_name, report, kind="result")
         agent.transition(AgentState.DONE)
-        # Terminal bell if agent ran >30s (notification for tabbed-away users)
-        if time.monotonic() - _agent_start_time > 30:
-            sys.__stdout__.write("\a")
-            sys.__stdout__.flush()
+        # Terminal bell if agent ran >30s in interactive mode
+        if (shared.state.agent_mode <= 1
+                and time.monotonic() - _agent_start_time > 30):
+            try:
+                sys.__stdout__.write("\a")
+                sys.__stdout__.flush()
+            except Exception:
+                pass
 
         # Record completion in project intelligence
         try:
