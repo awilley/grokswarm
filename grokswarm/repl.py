@@ -42,56 +42,70 @@ from grokswarm.guardrails import (
     PlanGate, Orchestrator, drain_notifications,
     get_model_tiers, set_model_tier, reset_model_tiers, _VALID_TIERS,
 )
+from grokswarm.cmd_dispatch import CmdEntry, CmdContext, register as _cmd, get_command, all_commands, busy_allowed_set
 
+# ---------------------------------------------------------------------------
+# Command Registration (metadata only — handlers are bound later in _chat_async)
+# ---------------------------------------------------------------------------
+# fmt: off
+_cmd("quit",         "Exit",                              aliases=["exit", "q"])(lambda arg, ctx: None)
+_cmd("help",         "Show this help")(lambda arg, ctx: None)
+_cmd("clear",        "Clear conversation & screen")(lambda arg, ctx: None)
+_cmd("context",      "Show project context (refresh to rescan)")(lambda arg, ctx: None)
+_cmd("session",      "Manage sessions (list/save/load/delete)")(lambda arg, ctx: None)
+_cmd("list",         "List project directory")(lambda arg, ctx: None)
+_cmd("read",         "Read file contents")(lambda arg, ctx: None)
+_cmd("write",        "Write/create file (with approval)")(lambda arg, ctx: None)
+_cmd("run",          "Run shell command (with approval)")(lambda arg, ctx: None)
+_cmd("search",       "Search files by name in project")(lambda arg, ctx: None)
+_cmd("grep",         "Search inside files for text")(lambda arg, ctx: None)
+_cmd("swarm",        "Run multi-agent supervisor",         allow_while_busy=False)(lambda arg, ctx: None)
+_cmd("experts",      "List available experts")(lambda arg, ctx: None)
+_cmd("skills",       "List available skills")(lambda arg, ctx: None)
+_cmd("git",          "Git status (log, diff, branch)")(lambda arg, ctx: None)
+_cmd("web",          "Search the web (xAI live)")(lambda arg, ctx: None)
+_cmd("x",            "Search X/Twitter posts (xAI live)")(lambda arg, ctx: None)
+_cmd("browse",       "Fetch URL content (Playwright)")(lambda arg, ctx: None)
+_cmd("test",         "Run project tests (auto-detect)")(lambda arg, ctx: None)
+_cmd("undo",         "Undo last file edit (multi-level)")(lambda arg, ctx: None)
+_cmd("trust",        "Toggle trust mode (auto-approve)")(lambda arg, ctx: None)
+_cmd("readonly",     "Toggle read-only mode (block writes)")(lambda arg, ctx: None)
+_cmd("verbose",      "Toggle output detail (compact/full)")(lambda arg, ctx: None)
+_cmd("project",      "Switch project directory")(lambda arg, ctx: None)
+_cmd("doctor",       "Check environment health")(lambda arg, ctx: None)
+_cmd("dashboard",    "Open live TUI dashboard")(lambda arg, ctx: None)
+_cmd("metrics",      "Show token usage and cost metrics")(lambda arg, ctx: None)
+_cmd("watch",        "Live monitor for running agents")(lambda arg, ctx: None)
+_cmd("tell",         "Send guidance to a running agent")(lambda arg, ctx: None)
+_cmd("abort",        "Abort currently running swarm")(lambda arg, ctx: None)
+_cmd("clear-swarm",  "Clear stale swarm data")(lambda arg, ctx: None)
+_cmd("agents",       "List active agents and states")(lambda arg, ctx: None)
+_cmd("peek",         "View agent plan/progress")(lambda arg, ctx: None)
+_cmd("pause",        "Pause a running agent")(lambda arg, ctx: None)
+_cmd("resume",       "Resume a paused agent")(lambda arg, ctx: None)
+_cmd("approve",      "Approve agent plan")(lambda arg, ctx: None)
+_cmd("reject",       "Reject plan and send feedback")(lambda arg, ctx: None)
+_cmd("tasks",        "Show orchestrator task DAG")(lambda arg, ctx: None)
+_cmd("budget",       "Set/view session cost limit")(lambda arg, ctx: None)
+_cmd("model",        "View/set model tiers")(lambda arg, ctx: None)
+_cmd("bugs",         "View/manage bugs")(lambda arg, ctx: None)
+_cmd("self-improve", "Improve own source (shadow + test)",  allow_while_busy=False)(lambda arg, ctx: None)
+# fmt: on
 
 # -- Context-Aware Tab Completion --
 class SwarmCompleter(Completer):
     """Smart completer: slash commands -> subcommands -> file paths / session names."""
 
-    SLASH_COMMANDS = {
-        "/help": "Show this help",
-        "/list": "List project directory",
-        "/read": "Read file contents",
-        "/write": "Write/create file (with approval)",
-        "/run": "Run shell command (with approval)",
-        "/search": "Search files by name in project",
-        "/grep": "Search inside files for text",
-        "/git": "Git status (log, diff, branch)",
-        "/web": "Search the web (xAI live)",
-        "/x": "Search X/Twitter posts (xAI live)",
-        "/browse": "Fetch URL content (Playwright)",
-        "/test": "Run project tests (auto-detect)",
-        "/undo": "Undo last file edit (multi-level)",
-        "/trust": "Toggle trust mode (auto-approve)",
-        "/readonly": "Toggle read-only mode (block writes)",
-        "/verbose": "Toggle output detail (compact/full)",
-        "/project": "Switch project directory",
-        "/doctor": "Check environment health",
-        "/dashboard": "Open live TUI dashboard",
-        "/metrics": "Show token usage and cost metrics",
-        "/self-improve": "Improve own source (shadow + test)",
-        "/swarm": "Run multi-agent supervisor",
-        "/watch": "Live monitor for running background agents",
-        "/abort": "Abort currently running swarm",
-        "/tell": "Send guidance to a running agent: /tell <agent> <message>",
-        "/clear-swarm": "Clear stale swarm data (agents, bus messages)",
-        "/experts": "List available experts",
-        "/skills": "List available skills",
-        "/agents": "List active agents and their states",
-        "/peek": "View agent plan/progress: /peek [name]",
-        "/pause": "Pause a running agent: /pause <name>",
-        "/resume": "Resume a paused agent: /resume <name>",
-        "/context": "Show project context",
-        "/session": "Manage sessions",
-        "/bugs": "View/manage bugs: /bugs [self|project] [add|fix ID]",
-        "/model": "View/set model tiers: /model [tier] [model-name]",
-        "/budget": "Set/view session cost limit: /budget [amount]",
-        "/approve": "Approve agent plan: /approve <name>",
-        "/reject": "Reject agent plan: /reject <name> [feedback]",
-        "/tasks": "Show orchestrator task DAG with dependencies",
-        "/clear": "Clear conversation & screen",
-        "/quit": "Exit",
-    }
+    @staticmethod
+    def _build_slash_commands() -> dict[str, str]:
+        """Derive completer entries from the command registry."""
+        cmds = {}
+        for entry in all_commands().values():
+            cmds[f"/{entry.name}"] = entry.description
+            for alias in entry.aliases:
+                cmds[f"/{alias}"] = entry.description
+        return cmds
+
     SESSION_SUBCMDS = ["list", "save", "load", "delete"]
     CONTEXT_SUBCMDS = ["refresh"]
     GIT_SUBCMDS = ["log", "diff", "branch"]
@@ -99,6 +113,9 @@ class SwarmCompleter(Completer):
     PROJECT_SUBCMDS = ["list", "switch"]
     MODEL_SUBCMDS = ["list", "reset", "fast", "reasoning", "hardcore", "multi_agent"]
     BUGS_SUBCMDS = ["list", "add", "show", "fix", "self", "project"]
+
+    # Class-level attribute — populated after class definition
+    SLASH_COMMANDS: dict[str, str] = {}
 
     def __init__(self):
         self._path_completer = PathCompleter(only_directories=False, expanduser=True,
@@ -177,6 +194,10 @@ class SwarmCompleter(Completer):
                 if sname.lower().startswith(name_prefix.lower()):
                     yield Completion(sname, start_position=-len(name_prefix),
                                     display_meta=f"{s['messages']} msgs")
+
+
+# Populate SLASH_COMMANDS from the command registry at module load time.
+SwarmCompleter.SLASH_COMMANDS = SwarmCompleter._build_slash_commands()
 
 
 # -- Recent Projects --
@@ -278,51 +299,12 @@ def delete_session(name: str) -> bool:
 def _show_help():
     shared.console.print()
     shared.console.print("[swarm.accent]Commands[/swarm.accent]")
-    help_items = [
-        ("/help", "Show this help"),
-        ("/list [path]", "List project directory"),
-        ("/read <file>", "Read file contents"),
-        ("/write <file>", "Write/create file (with approval)"),
-        ("/run <cmd>", "Run shell command (with approval)"),
-        ("/search <query>", "Search files by name in project"),
-        ("/grep <pattern> [path]", "Search inside files for text"),
-        ("/git", "Git status (log, diff, branch)"),
-        ("/web <query>", "Search the web (xAI live)"),
-        ("/x <query>", "Search X/Twitter posts (xAI live)"),
-        ("/browse <url>", "Fetch URL content (Playwright)"),
-        ("/test [cmd]", "Run project tests (auto-detect framework)"),
-        ("/undo", "Undo last file edit (multi-level)"),
-        ("/trust", "Toggle trust mode (auto-approve)"),
-        ("/readonly", "Toggle read-only mode (block writes)"),
-        ("/verbose", "Toggle output detail (compact/full)"),
-        ("/project <path>", "Switch project directory"),
-        ("/doctor", "Check environment health"),
-        ("/dashboard", "Open live TUI dashboard"),
-        ("/metrics", "Show token usage and cost metrics"),
-        ("/self-improve <desc>", "Improve own source code (shadow + auto-test)"),
-        ("/swarm <task>", "Run multi-agent supervisor"),
-        ("/watch", "Live monitor for running background agents"),
-        ("/abort", "Abort currently running swarm"),
-        ("/tell <agent> <msg>", "Send guidance to a running agent mid-task"),
-        ("/approve <agent>", "Approve an agent's plan (transition to execution)"),
-        ("/reject <agent> <feedback>", "Reject plan and send feedback"),
-        ("/clear-swarm", "Clear stale swarm data (agents, bus messages)"),
-        ("/agents", "List active agents and their states"),
-        ("/peek [name]", "View agent plan/progress"),
-        ("/pause <name>", "Pause a running agent"),
-        ("/resume <name>", "Resume a paused agent"),
-        ("/tasks", "Show orchestrator task DAG with dependencies"),
-        ("/budget [amount]", "Set/view session cost limit (e.g., /budget 5.00)"),
-        ("/model [tier] [name]", "View/set model tiers"),
-        ("/experts", "List available experts"),
-        ("/skills", "List available skills"),
-        ("/context", "Show project context (refresh to rescan)"),
-        ("/session", "Manage sessions (list/save/load/delete)"),
-        ("/clear", "Clear conversation & screen"),
-        ("/quit", "Exit"),
-    ]
-    for cmd, desc in help_items:
-        shared.console.print(f"  [bold]{cmd:<24}[/bold] [dim]{desc}[/dim]")
+    for entry in all_commands().values():
+        name = f"/{entry.name}"
+        aliases = ""
+        if entry.aliases:
+            aliases = f" (/{'/'.join(entry.aliases)})"
+        shared.console.print(f"  [bold]{name + aliases:<24}[/bold] [dim]{entry.description}[/dim]")
     shared.console.print()
 
 
@@ -817,11 +799,7 @@ async def _chat_async(session_name: str | None = None):
                     cmd = parts[0][1:].lower()
                     arg = parts[1] if len(parts) > 1 else ""
 
-                    if processing_busy and cmd not in {"abort", "tell", "agents", "watch", "verbose", "help", "quit", "exit", "q",
-                                                       "doctor", "dashboard", "metrics", "context", "experts", "skills",
-                                                       "trust", "readonly", "git", "list", "read", "search", "grep",
-                                                       "session", "project", "undo", "budget", "peek", "pause", "resume",
-                                                       "approve", "reject", "model", "bugs"}:
+                    if processing_busy and cmd not in busy_allowed_set():
                         shared.console.print("[swarm.dim]Busy processing previous prompt. Wait, or use /abort.[/swarm.dim]")
                         continue
 
