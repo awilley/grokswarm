@@ -86,6 +86,9 @@ class SwarmState:
     global_cost_budget_usd: float = 0.0
     global_cost_usd: float = 0.0
     session_cost_budget_usd: float = 0.0  # 0 = no limit; set via /budget
+    planning_mode: bool = False              # /plan toggle — enforced planning
+    session_plan: list[dict] = field(default_factory=list)  # [{step, status}]
+    session_plan_phase: str = "idle"         # "idle" | "planning" | "executing"
     project_prompt_tokens: int = 0
     project_completion_tokens: int = 0
     project_cached_tokens: int = 0
@@ -101,6 +104,8 @@ class SwarmState:
         self.global_cost_usd = 0.0
         self.request_auto_approve = False
         self.vi_mode = False
+        self.session_plan.clear()
+        self.session_plan_phase = "idle"
 
     def register_agent(self, name: str, expert: str, task: str = "",
                        token_budget: int = 0, cost_budget_usd: float = 0.0,

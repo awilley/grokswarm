@@ -53,13 +53,29 @@ Be concise — 3-5 lines max. Working directory is: """ + str(shared.PROJECT_DIR
 
 
 def _approval_prompt(command: str, is_dangerous: bool = False) -> str:
+    label = "Confirm dangerous command?" if is_dangerous else "Approve command?"
+
+    # Toolbar path: route through prompt_toolkit when REPL is running
+    app = shared._toolbar_app_ref
+    if app and getattr(app, 'is_running', False) and not shared._is_prompt_suspended:
+        result = shared._toolbar_confirm(
+            label, default=False,
+            extra_keys={"i": "explain", "t": "trust all"},
+        )
+        if result is True:
+            return "y"
+        elif result is False:
+            return "n"
+        else:
+            return str(result)
+
+    # Inline path: direct stdout + _read_single_key
     import sys
     out = sys.__stdout__
     sep_color = "\033[31m" if is_dangerous else "\033[33m"  # red vs yellow
     reset = "\033[0m"
     dim = "\033[2m"
     bold = "\033[1m"
-    label = "Confirm dangerous command?" if is_dangerous else "Approve command?"
 
     # Non-TTY fallback
     try:

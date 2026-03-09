@@ -274,6 +274,20 @@ async def handle_trust(arg: str, ctx: CmdContext) -> None:
         shared.console.print("[swarm.dim]Non-dangerous ops will be auto-approved. Shell + destructive git still gated.[/swarm.dim]")
 
 
+async def handle_plan(arg: str, ctx: CmdContext) -> None:
+    shared.state.planning_mode = not shared.state.planning_mode
+    shared.state.session_plan.clear()
+    shared.state.session_plan_phase = "idle"
+    status = "ON" if shared.state.planning_mode else "OFF"
+    color = "bold cyan" if shared.state.planning_mode else "bold green"
+    shared.console.print(f"[{color}]Planning mode: {status}[/{color}]")
+    if shared.state.planning_mode:
+        shared.console.print("[swarm.dim]Write tools blocked until model calls update_plan. Use /plan again to disable.[/swarm.dim]")
+    # Refresh system prompt so planning instructions take effect
+    shared.SYSTEM_PROMPT = build_system_prompt(shared.PROJECT_CONTEXT)
+    ctx.conversation[0] = {"role": "system", "content": shared.SYSTEM_PROMPT}
+
+
 async def handle_readonly(arg: str, ctx: CmdContext) -> None:
     shared.state.read_only = not shared.state.read_only
     ro_state = "ON" if shared.state.read_only else "OFF"

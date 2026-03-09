@@ -671,10 +671,15 @@ async def _stream_with_tools(conversation: list) -> str:
                     })
             else:
                 # Check if ANY tool in this round needs approval (non-threadable).
-                # If so, suspend prompt_toolkit ONCE for the entire batch to
-                # prevent prompt flashing between sequential approvals.
-                _needs_suspension = any(
-                    not _is_threadable(n) for _, n, _ in parsed_tools
+                # If toolbar is available, approvals route through it without
+                # suspending prompt_toolkit. Otherwise suspend ONCE for the batch.
+                _toolbar_available = (
+                    shared._toolbar_app_ref
+                    and getattr(shared._toolbar_app_ref, 'is_running', False)
+                )
+                _needs_suspension = (
+                    any(not _is_threadable(n) for _, n, _ in parsed_tools)
+                    and not _toolbar_available
                 )
                 if _needs_suspension:
                     shared._clear_status()

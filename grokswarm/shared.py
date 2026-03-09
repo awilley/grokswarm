@@ -5,6 +5,7 @@ import re
 import sys
 import asyncio
 import atexit
+import concurrent.futures
 import contextvars
 import typer
 from pathlib import Path
@@ -62,6 +63,10 @@ _cancel_event = asyncio.Event()
 
 # Pending clipboard images (base64 data URIs) queued via Alt+V
 _pending_images: list[str] = []
+
+# Pending approval prompt (toolbar-based confirmation)
+# {"prompt": str, "default": bool, "future": concurrent.futures.Future, "extra_keys": dict | None}
+_pending_approval: dict | None = None
 
 
 def _set_status(text: str):
@@ -302,13 +307,12 @@ def _read_single_key() -> str:
         return ch
 
 
-def _terminal_confirm(prompt_text: str, default: bool = True) -> bool:
-    """Ask y/n via single-keypress with ANSI-styled hint bar.
+def _inline_confirm(prompt_text: str, default: bool = True) -> bool:
+    """Ask y/n via single-keypress with ANSI-styled hint bar (inline/stdout path).
 
+    Used when no REPL is running (tests, scripts, between prompts).
     Bypasses Rich and prompt_toolkit to avoid spinner-character leakage.
     """
-    import re as _re
-    clean = _re.sub(r'\[/?[^\]]*\]', '', prompt_text)
     out = sys.__stdout__
     sep_color = "\033[90m" if default else "\033[33m"  # gray vs yellow
     reset = "\033[0m"
@@ -327,7 +331,7 @@ def _terminal_confirm(prompt_text: str, default: bool = True) -> bool:
     def_hint_n = " (default)" if not default else ""
     out.write(
         f"\n{sep_color}{'─' * 50}{reset}\n"
-        f"  {bold}{clean}{reset}\n"
+        f"  {bold}{prompt_text}{reset}\n"
         f"  {dim} y {reset} approve{def_hint_y}"
         f"   {dim} n {reset} reject{def_hint_n}"
         f"   {dim} esc {reset} cancel\n"
@@ -364,6 +368,63 @@ def _terminal_confirm(prompt_text: str, default: bool = True) -> bool:
             out.flush()
             return False
         # Ignore any other key (including empty from special keys)
+
+
+def _toolbar_confirm(prompt_text: str, default: bool = True, extra_keys: dict | None = None):
+    """Ask y/n via prompt_toolkit toolbar key bindings.
+
+    Creates a Future, sets _pending_approval, and blocks until resolved.
+    Returns True/False for y/n, or a string for extra keys (e.g. "i", "trust").
+    """
+    global _pending_approval
+    future = concurrent.futures.Future()
+    _pending_approval = {
+        "prompt": prompt_text,
+        "default": default,
+        "future": future,
+        "extra_keys": extra_keys,
+    }
+    app = _toolbar_app_ref
+    if app:
+        try:
+            app.invalidate()
+        except Exception:
+            pass
+
+    try:
+        result = future.result(timeout=300)
+    except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
+        result = False
+    finally:
+        _pending_approval = None
+        if app:
+            try:
+                app.invalidate()
+            except Exception:
+                pass
+
+    # Print dim feedback
+    out = sys.__stdout__
+    dim = "\033[2m"
+    reset = "\033[0m"
+    if result is True:
+        out.write(f"  {dim}> Approved{reset}\n")
+    elif result is False:
+        out.write(f"  {dim}> Rejected{reset}\n")
+    else:
+        out.write(f"  {dim}> {result}{reset}\n")
+    out.flush()
+    return result
+
+
+def _terminal_confirm(prompt_text: str, default: bool = True) -> bool:
+    """Ask y/n — routes to toolbar or inline depending on REPL state."""
+    clean = re.sub(r'\[/?[^\]]*\]', '', prompt_text)
+    app = _toolbar_app_ref
+    if app and getattr(app, 'is_running', False) and not _is_prompt_suspended:
+        result = _toolbar_confirm(clean, default)
+        return bool(result)
+    return _inline_confirm(clean, default)
 
 
 def _auto_approve(prompt: str, default: bool = True) -> bool:

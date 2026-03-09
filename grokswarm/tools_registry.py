@@ -731,10 +731,7 @@ _READONLY_BLOCKED_TOOLS = {"write_file", "edit_file", "run_shell", "git_commit",
 
 
 # -- Agent Plan/Progress Tracking --
-def _update_plan_impl(agent_name: str, steps: list[dict]) -> str:
-    agent = shared.state.get_agent(agent_name)
-    if not agent:
-        return f"Agent '{agent_name}' not found."
+def _update_plan_impl(agent_name: str, steps: list[dict], session_mode: bool = False) -> str:
     valid_statuses = {"pending", "in-progress", "done", "skipped"}
     plan = []
     for s in steps:
@@ -745,13 +742,23 @@ def _update_plan_impl(agent_name: str, steps: list[dict]) -> str:
         if step_status not in valid_statuses:
             step_status = "pending"
         plan.append({"step": step_text, "status": step_status})
+
+    if session_mode:
+        shared.state.session_plan = plan
+        done_count = sum(1 for s in plan if s["status"] == "done")
+        return f"Plan updated: {done_count}/{len(plan)} steps complete."
+
+    agent = shared.state.get_agent(agent_name)
+    if not agent:
+        return f"Agent '{agent_name}' not found."
     agent.plan = plan
     done_count = sum(1 for s in plan if s["status"] == "done")
     return f"Plan updated: {done_count}/{len(plan)} steps complete."
 
 
 TOOL_DISPATCH["update_plan"] = lambda args: _update_plan_impl(
-    args.get("_agent_name", "unknown"), args.get("steps", [])
+    args.get("_agent_name", "unknown"), args.get("steps", []),
+    session_mode=args.get("_session_mode", False),
 )
 
 _UPDATE_PLAN_SCHEMA = {
@@ -793,6 +800,14 @@ def get_agent_tool_schemas(allowed_tools: set[str] | None = None) -> list[dict]:
         allowed_with_plan = allowed_tools | {"update_plan"}
         base = [t for t in base if t.get("function", {}).get("name") in allowed_with_plan]
     return base
+
+
+def get_session_tool_schemas(include_plan_tool: bool = False) -> list[dict]:
+    """Tool schemas for the regular (non-agent) prompt flow.
+    When include_plan_tool is True, appends update_plan so the model can outline steps."""
+    if include_plan_tool:
+        return TOOL_SCHEMAS + [_UPDATE_PLAN_SCHEMA]
+    return list(TOOL_SCHEMAS)
 
 
 # Static snapshot for backward compat — prefer get_agent_tool_schemas() for fresh list

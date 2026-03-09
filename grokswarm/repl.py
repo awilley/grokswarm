@@ -17,7 +17,9 @@ from rich.table import Table
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion, PathCompleter
 from prompt_toolkit.document import Document
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -727,6 +729,8 @@ async def _chat_async(session_name: str | None = None):
 
     @kb.add('escape')
     def _handle_escape(event):
+        if shared._pending_approval is not None:
+            return  # handled by approval key bindings
         if shared.state.vi_mode:
             return  # let prompt_toolkit's vi handler process escape
         buf = event.current_buffer
@@ -793,6 +797,59 @@ async def _chat_async(session_name: str | None = None):
             shared._toolbar_status_expires = _time.monotonic() + 2.0
             event.app.invalidate()
 
+    # -- Approval key bindings (active only when _pending_approval is set) --
+    _approval_active = Condition(lambda: shared._pending_approval is not None)
+
+    @kb.add('y', filter=_approval_active, eager=True)
+    def _approval_yes(event):
+        ap = shared._pending_approval
+        if ap and not ap["future"].done():
+            ap["future"].set_result(True)
+
+    @kb.add('n', filter=_approval_active, eager=True)
+    def _approval_no(event):
+        ap = shared._pending_approval
+        if ap and not ap["future"].done():
+            ap["future"].set_result(False)
+
+    @kb.add('escape', filter=_approval_active, eager=True)
+    def _approval_esc(event):
+        ap = shared._pending_approval
+        if ap and not ap["future"].done():
+            ap["future"].set_result(False)
+
+    @kb.add('enter', filter=_approval_active, eager=True)
+    def _approval_enter(event):
+        ap = shared._pending_approval
+        if ap and not ap["future"].done():
+            ap["future"].set_result(ap["default"])
+
+    @kb.add('c-c', filter=_approval_active, eager=True)
+    def _approval_cancel(event):
+        ap = shared._pending_approval
+        if ap and not ap["future"].done():
+            ap["future"].cancel()
+
+    @kb.add('i', filter=_approval_active, eager=True)
+    def _approval_explain(event):
+        ap = shared._pending_approval
+        if ap and not ap["future"].done():
+            if ap.get("extra_keys") and "i" in ap["extra_keys"]:
+                ap["future"].set_result("i")
+            # else: swallow (no explain option for this prompt)
+
+    @kb.add('t', filter=_approval_active, eager=True)
+    def _approval_trust(event):
+        ap = shared._pending_approval
+        if ap and not ap["future"].done():
+            if ap.get("extra_keys") and "t" in ap["extra_keys"]:
+                ap["future"].set_result("trust")
+            # else: swallow
+
+    @kb.add(Keys.Any, filter=_approval_active, eager=True)
+    def _approval_swallow(event):
+        pass  # swallow all other keys during approval
+
     _multiline_supported = False
     try:
         @kb.add('s-enter', eager=True)
@@ -805,6 +862,8 @@ async def _chat_async(session_name: str | None = None):
     if _multiline_supported:
         @kb.add('enter', eager=True)
         def _handle_enter(event):
+            if shared._pending_approval is not None:
+                return  # handled by approval key bindings
             buf = event.current_buffer
             if buf.complete_state:
                 buf.complete_state = None
@@ -863,6 +922,27 @@ async def _chat_async(session_name: str | None = None):
         return str(n)
 
     def get_bottom_toolbar():
+        # Approval prompt takes over the toolbar
+        ap = shared._pending_approval
+        if ap is not None:
+            prompt = ap["prompt"]
+            default = ap.get("default", True)
+            extra = ap.get("extra_keys")
+            def_y = " (default)" if default else ""
+            def_n = " (default)" if not default else ""
+            lines = [
+                f"  <ansiyellow>{prompt}</ansiyellow>",
+                f"  <ansidarkgray> y </ansidarkgray> approve{def_y}"
+                f"   <ansidarkgray> n </ansidarkgray> reject{def_n}"
+                f"   <ansidarkgray> esc </ansidarkgray> cancel",
+            ]
+            if extra:
+                extra_parts = []
+                for key, label in extra.items():
+                    extra_parts.append(f"<ansidarkgray> {key} </ansidarkgray> {label}")
+                lines.append("  " + "   ".join(extra_parts))
+            return HTML("\n".join(lines))
+
         if shared.state.trust_mode:
             mode_str = "<ansigreen>TRUST</ansigreen>"
         elif shared.state.read_only:
