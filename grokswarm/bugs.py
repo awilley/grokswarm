@@ -7,6 +7,7 @@ Both use the same JSON format and BugTracker API.
 """
 
 import json
+import sys
 import time
 import traceback
 from dataclasses import dataclass, field, asdict
@@ -179,12 +180,34 @@ def log_project_bug(title: str, description: str, severity: BugSeverity = "mediu
 # Auto-logging hooks (called from guardrails, engine, agents)
 # ---------------------------------------------------------------------------
 
+def _is_testing() -> bool:
+    """Return True if running under pytest (skip noisy auto-logging during tests)."""
+    return "pytest" in sys.modules or "unittest" in sys.modules
+
+
+def _is_duplicate(tracker: BugTracker, title: str) -> bool:
+    """Check if an open bug with the same title already exists."""
+    for b in tracker.list(status="open"):
+        if b.title == title:
+            return True
+    return False
+
+
 def log_exception(exc: Exception, context_label: str = ""):
-    """Auto-log an unhandled exception as a GrokSwarm self-bug."""
+    """Auto-log an unhandled exception as a GrokSwarm self-bug.
+
+    Skips logging during test runs and deduplicates by title.
+    """
+    if _is_testing():
+        return
+    title = f"Unhandled {type(exc).__name__}: {str(exc)[:80]}"
+    tracker = get_self_tracker()
+    if _is_duplicate(tracker, title):
+        return
     tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
     tb_str = "".join(tb[-3:])  # last 3 frames
-    log_self_bug(
-        title=f"Unhandled {type(exc).__name__}: {str(exc)[:80]}",
+    tracker.log(
+        title=title,
         description=f"{context_label}\n\n{tb_str}",
         severity="high",
         source="auto",
@@ -194,10 +217,15 @@ def log_exception(exc: Exception, context_label: str = ""):
 
 def log_loop_detection(agent_name: str, escalation_count: int, error_sig: str = ""):
     """Auto-log when loop detector fires (potential GrokSwarm or task issue)."""
+    if _is_testing():
+        return
     if escalation_count >= 2:
-        # Repeated loops suggest a systemic issue
-        log_self_bug(
-            title=f"Repeated loop in agent '{agent_name}' ({escalation_count} escalations)",
+        title = f"Repeated loop in agent '{agent_name}' ({escalation_count} escalations)"
+        tracker = get_self_tracker()
+        if _is_duplicate(tracker, title):
+            return
+        tracker.log(
+            title=title,
             description=f"Agent got stuck in a loop pattern. Error signature: {error_sig[:200]}",
             severity="medium",
             source="auto",
@@ -207,8 +235,14 @@ def log_loop_detection(agent_name: str, escalation_count: int, error_sig: str = 
 
 def log_tool_error(tool_name: str, error: str, agent_name: str = ""):
     """Auto-log a tool execution error."""
-    log_self_bug(
-        title=f"Tool error: {tool_name}: {error[:60]}",
+    if _is_testing():
+        return
+    title = f"Tool error: {tool_name}: {error[:60]}"
+    tracker = get_self_tracker()
+    if _is_duplicate(tracker, title):
+        return
+    tracker.log(
+        title=title,
         description=f"Tool '{tool_name}' failed during execution.\nAgent: {agent_name or 'repl'}\nError: {error[:500]}",
         severity="low",
         source="auto",
@@ -218,8 +252,14 @@ def log_tool_error(tool_name: str, error: str, agent_name: str = ""):
 
 def log_guardrail_failure(guardrail: str, detail: str, agent_name: str = ""):
     """Auto-log when a guardrail detects a problem."""
-    log_self_bug(
-        title=f"Guardrail '{guardrail}' triggered: {detail[:60]}",
+    if _is_testing():
+        return
+    title = f"Guardrail '{guardrail}' triggered: {detail[:60]}"
+    tracker = get_self_tracker()
+    if _is_duplicate(tracker, title):
+        return
+    tracker.log(
+        title=title,
         description=f"Guardrail: {guardrail}\nAgent: {agent_name or 'repl'}\nDetail: {detail[:500]}",
         severity="low",
         source="auto",
