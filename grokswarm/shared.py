@@ -179,6 +179,7 @@ TEAMS_DIR = Path("teams")
 MEMORY_DIR = Path("memory")
 SESSIONS_DIR = Path.home() / ".grokswarm" / "sessions"
 CONTEXT_CACHE_DIR = Path.home() / ".grokswarm" / "cache"
+PLUGINS_DIR = Path.home() / ".grokswarm" / "plugins"
 _RECENT_PROJECTS_FILE = Path.home() / ".grokswarm" / "recent_projects.json"
 SKILLS_DIR.mkdir(exist_ok=True)
 EXPERTS_DIR.mkdir(exist_ok=True)
@@ -186,6 +187,7 @@ TEAMS_DIR.mkdir(exist_ok=True)
 MEMORY_DIR.mkdir(exist_ok=True)
 SESSIONS_DIR.mkdir(exist_ok=True, parents=True)
 CONTEXT_CACHE_DIR.mkdir(exist_ok=True, parents=True)
+PLUGINS_DIR.mkdir(exist_ok=True, parents=True)
 
 
 # -- Background tasks --
