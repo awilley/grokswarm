@@ -2354,12 +2354,16 @@ class TestBugTracker:
         assert "/bugs" in SwarmCompleter.SLASH_COMMANDS
 
     def test_report_bug_impl(self, tmp_path):
-        from grokswarm.bugs import report_bug_impl, get_project_tracker, _project_tracker, _project_tracker_dir
+        from grokswarm.bugs import report_bug_impl
         import grokswarm.bugs as bugs_mod
+        from grokswarm import shared
         old_tracker = bugs_mod._project_tracker
         old_dir = bugs_mod._project_tracker_dir
-        bugs_mod._project_tracker = BugTracker(tmp_path / ".grokswarm" / "bugs.json")
-        bugs_mod._project_tracker_dir = tmp_path
+        old_project = shared.PROJECT_DIR
+        # Force fresh tracker by clearing singleton and pointing at tmp_path
+        bugs_mod._project_tracker = None
+        bugs_mod._project_tracker_dir = None
+        shared.PROJECT_DIR = tmp_path
         try:
             result = report_bug_impl("test title", "test desc", "high", "project")
             assert "#1" in result
@@ -2367,6 +2371,7 @@ class TestBugTracker:
         finally:
             bugs_mod._project_tracker = old_tracker
             bugs_mod._project_tracker_dir = old_dir
+            shared.PROJECT_DIR = old_project
 
     def test_bug_read_only_safe(self):
         from grokswarm.tools_registry import READ_ONLY_TOOLS
