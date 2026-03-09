@@ -81,6 +81,9 @@ class SwarmCompleter(Completer):
         "/resume": "Resume a paused agent: /resume <name>",
         "/context": "Show project context",
         "/session": "Manage sessions",
+        "/budget": "Set/view session cost limit: /budget [amount]",
+        "/approve": "Approve agent plan: /approve <name>",
+        "/reject": "Reject agent plan: /reject <name> [feedback]",
         "/clear": "Clear conversation & screen",
         "/quit": "Exit",
     }
@@ -791,7 +794,8 @@ async def _chat_async(session_name: str | None = None):
                     if processing_busy and cmd not in {"abort", "tell", "agents", "watch", "verbose", "help", "quit", "exit", "q",
                                                        "doctor", "dashboard", "metrics", "context", "experts", "skills",
                                                        "trust", "readonly", "git", "list", "read", "search", "grep",
-                                                       "session", "project", "undo"}:
+                                                       "session", "project", "undo", "budget", "peek", "pause", "resume",
+                                                       "approve", "reject"}:
                         shared.console.print("[swarm.dim]Busy processing previous prompt. Wait, or use /abort.[/swarm.dim]")
                         continue
 

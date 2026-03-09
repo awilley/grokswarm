@@ -550,12 +550,13 @@ class TestSlashCommands:
                     "/grep", "/git", "/web", "/x", "/browse", "/test",
                     "/undo", "/swarm", "/experts", "/skills", "/context",
                     "/session", "/clear", "/self-improve", "/trust",
-                    "/project", "/readonly", "/doctor", "/dashboard", "/metrics", "/abort", "/quit"}
+                    "/project", "/readonly", "/doctor", "/dashboard", "/metrics", "/abort", "/quit",
+                    "/budget", "/approve", "/reject"}
         for cmd in expected:
             assert cmd in cmds, f"Missing slash command: {cmd}"
 
     def test_command_count(self):
-        assert len(_main.SwarmCompleter.SLASH_COMMANDS) >= 28
+        assert len(_main.SwarmCompleter.SLASH_COMMANDS) >= 31
 
 
 # -- Constants / version ---------------------------------------------------
