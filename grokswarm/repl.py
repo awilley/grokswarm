@@ -1163,7 +1163,7 @@ async def _chat_async(session_name: str | None = None):
                         else:
                             shared.console.print("[dim]No task DAG active. Use /swarm to start one.[/dim]")
                     elif cmd == "budget":
-                        from grokswarm.agents import _cost_guard
+                        from grokswarm.guardrails import _cost_guard
                         if arg and arg.strip():
                             try:
                                 budget_val = float(arg.strip().lstrip("$"))

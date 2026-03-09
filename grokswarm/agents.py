@@ -17,12 +17,10 @@ from grokswarm.registry_helpers import list_experts, save_memory
 from grokswarm.engine import _execute_tool, _repair_json, _trim_conversation, _tool_detail, MAX_TOOL_RESULT_SIZE
 from grokswarm.guardrails import (
     PlanGate, GoalVerifier, LoopDetector, EvidenceTracker,
-    ToolFilter, Orchestrator, notify,
+    ToolFilter, Orchestrator, notify, _auto_print,
     TaskComplexity, LessonsDB, CostGuard, DynamicTools,
+    GuardrailPipeline,
 )
-
-# Singleton cost guard for the session
-_cost_guard = CostGuard()
 
 
 class SwarmBus:
@@ -368,31 +366,6 @@ def _build_completion_report(display_name: str, tool_actions: list[str], rounds_
     return "\n".join(lines)
 
 
-def _log_tool_call(agent, tool_name: str, args: dict, result: str, round_num: int):
-    """Append to agent's rolling tool call log for /peek visibility."""
-    args_summary = ""
-    if tool_name in ("read_file", "write_file", "edit_file"):
-        args_summary = args.get("path", "")
-    elif tool_name == "run_tests":
-        args_summary = args.get("command", "default")
-    elif tool_name == "run_shell":
-        args_summary = args.get("command", "")[:60]
-    elif tool_name == "update_plan":
-        args_summary = f"{len(args.get('steps', []))} steps"
-    else:
-        args_summary = str(list(args.keys()))[:40]
-
-    result_preview = result[:120].replace("\n", " ")
-    agent.tool_call_log.append({
-        "tool": tool_name,
-        "args": args_summary,
-        "result": result_preview,
-        "round": round_num,
-    })
-    # Keep only last 10 entries
-    if len(agent.tool_call_log) > 10:
-        agent.tool_call_log = agent.tool_call_log[-10:]
-
 
 def _planning_prompt(task_desc: str) -> str:
     """Return the planning section of the system prompt, or simplified version for simple tasks."""
@@ -421,7 +394,6 @@ async def run_expert(name: str, task_desc: str, bus: SwarmBus | None = None, age
         shared.console.print(f"[red]Expert {name} not found.[/red]")
         return ""
     data = yaml.safe_load(expert_file.read_text())
-    expert_model = data.get("model") or shared.CODE_MODEL or shared.MODEL
     expert_temperature = data.get("temperature")
     max_rounds = data.get("max_rounds", EXPERT_DEFAULT_MAX_ROUNDS)
     display_name = agent_name or name
@@ -431,7 +403,7 @@ async def run_expert(name: str, task_desc: str, bus: SwarmBus | None = None, age
 
     if not agent.check_budget():
         agent.transition(AgentState.PAUSED)
-        msg = f"Agent '{display_name}' paused: over budget (tokens={agent.tokens_used}/{agent.token_budget}, cost=${agent.cost_usd:.4f}/${agent.cost_budget_usd:.4f})"
+        msg = f"Agent '{display_name}' paused: over budget"
         shared.console.print(f"[swarm.warning]{msg}[/swarm.warning]")
         if bus:
             bus.post(display_name, msg, recipient=agent.parent or "*", kind="status")
@@ -439,22 +411,18 @@ async def run_expert(name: str, task_desc: str, bus: SwarmBus | None = None, age
 
     if agent.pause_requested:
         agent.transition(AgentState.PAUSED)
-        msg = f"Agent '{display_name}' paused by user request."
-        shared.console.print(f"[yellow]{msg}[/yellow]")
-        return msg
+        return f"Agent '{display_name}' paused by user request."
 
-    # Auto-checkpoint dirty state before agent starts modifying files
     _auto_checkpoint_before_agent(display_name)
-
     agent.transition(AgentState.THINKING)
 
+    # -- Build system prompt --
     prior_context = ""
     if bus:
         summary = bus.summary()
         if summary:
             prior_context = f"\n\n--- Prior agent outputs ---\n{summary}\n---\n"
 
-    # Inject project context so the agent knows the codebase
     project_context = ""
     if shared.PROJECT_CONTEXT and shared.PROJECT_CONTEXT.get("project_name"):
         from grokswarm.context import format_context_for_prompt
@@ -463,7 +431,6 @@ async def run_expert(name: str, task_desc: str, bus: SwarmBus | None = None, age
         except (KeyError, TypeError):
             pass
 
-    # Detect tech stack for contextual guidance
     tech_stack = _detect_tech_stack()
     tech_stack_line = f"\nProject tech stack: {tech_stack}" if tech_stack else ""
 
@@ -476,15 +443,14 @@ Rules:
 - Stay strictly in character.
 - Respond concisely and directly. No emojis. No hype. No filler.
 - Do not say "Done!", "Fixed!", "Enjoy!", "Perfect!" or similar. State what changed.
-- Focus on the task, not the AI brand.
 - Focus only on helping the user.
 - USE your tools to actually create files and make changes. Call write_file, edit_file, run_shell directly.
 - Do not just describe what to do — actually do it immediately.
 - After writing code, run it (run_shell or run_tests) to verify it works. Do not claim it works without running it.
 - Use capture_tui_screenshot or run_app_capture to verify visual/UI output when relevant.
-- Use web_search when you genuinely need current or unknown information. For standard programming knowledge, use your built-in knowledge.
+- Use web_search when you genuinely need current or unknown information.
 - Work fast: create files, write code, test, done. Minimize rounds.
-- BEFORE you finish, you MUST run run_tests (or run_shell with appropriate test command) if you modified any code files. Never claim success without verified test results.
+- BEFORE you finish, you MUST run run_tests if you modified any code files.
 
 {_planning_prompt(task_desc)}{prior_context}{project_context}"""
 
@@ -494,38 +460,11 @@ Rules:
     ]
     full_output = ""
     tool_actions: list[str] = []
-    made_file_mutations = False
-    ran_tests = False
-    verification_prompted = False
 
-    # -- Guardrails setup --
-    loop_detector = LoopDetector()
-    evidence_tracker = EvidenceTracker()
-    lessons_db = LessonsDB()
-    loop_escalation_count = 0
-    model_escalated = False  # True when loop detector escalated to hardcore model
-    loop_error_at_escalation: str = ""  # error sig when loop was detected (for lesson recording)
-
-    # Complexity-based planning skip
-    if TaskComplexity.should_skip_planning(task_desc):
-        agent.phase = "executing"
-        shared._log(f"agent {display_name}: simple task, skipping planning phase")
-
-    # Dynamic tool granting: merge expert's static tools with task-inferred ones
-    allowed_tools = ToolFilter.get_tools_for_expert(data)
-    allowed_tools = DynamicTools.merge_tools(allowed_tools, task_desc)
-    agent_tools = get_agent_tool_schemas(allowed_tools=allowed_tools)
-
-    # Model routing per phase (4-tier system)
-    planning_model = ToolFilter.get_model_for_phase(data, "planning")
-    execution_model = ToolFilter.get_model_for_phase(data, "executing")
-    escalation_model = ToolFilter.get_model_for_escalation()
-
-    # Inject lessons from previous sessions
-    relevant_lessons = lessons_db.find_relevant(files=[])
-    if relevant_lessons:
-        lesson_text = lessons_db.format_for_prompt(relevant_lessons)
-        conversation.append({"role": "user", "content": lesson_text})
+    # -- Initialize guardrail pipeline (all guardrail state lives here) --
+    gp = GuardrailPipeline(agent, display_name, task_desc, data, bus)
+    gp.setup(conversation)
+    agent_tools = gp.get_tool_schemas()
 
     shared.state.agent_mode += 1
     try:
@@ -533,78 +472,33 @@ Rules:
         for _round in range(max_rounds):
             rounds_used = _round + 1
 
-            # Compact conversation if it's getting large (same as main chat loop)
             conversation = await _trim_conversation(conversation)
 
-            # Mid-run user interaction: check bus for nudge messages
+            # Check bus for user nudges
             if bus:
-                nudges = bus.read(display_name, since_id=0)
-                for nudge in nudges:
+                for nudge in bus.read(display_name, since_id=0):
                     if nudge["kind"] == "nudge" and nudge["sender"] != display_name:
-                        conversation.append({
-                            "role": "user",
-                            "content": f"[USER GUIDANCE] {nudge['body']}",
-                        })
-                        shared._log(f"agent {display_name}: received nudge from {nudge['sender']}")
+                        conversation.append({"role": "user", "content": f"[USER GUIDANCE] {nudge['body']}"})
 
             agent.transition(AgentState.THINKING)
 
-            # -- Goal anchoring: inject at 40% and 70% of max_rounds --
-            pct = (_round + 1) / max_rounds
-            if _round > 0 and abs(pct - 0.4) < (1.0 / max_rounds):
-                conversation.append({
-                    "role": "user",
-                    "content": f'[SYSTEM] Checkpoint -- original goal: "{task_desc[:200]}". Are you on track? If not, adjust your plan.',
-                })
+            # Guardrail: inject round-appropriate system messages
+            gp.on_round_start(_round, max_rounds, conversation)
 
-            # -- Reflection prompt at ~80% of max_rounds (gives agent 20% remaining to act) --
-            reflection_round = int(max_rounds * 0.8)
-            if _round == reflection_round and _round > 2:
-                conversation.append({
-                    "role": "user",
-                    "content": GoalVerifier.build_reflection_prompt(task_desc),
-                })
+            # Select model (handles phase routing + escalation)
+            round_model = gp.select_model()
 
-            # Warn agent on final round so it can wrap up
-            if _round == max_rounds - 1:
-                conversation.append({
-                    "role": "user",
-                    "content": "[SYSTEM] This is your FINAL round. Wrap up now: summarize what you accomplished and what remains unfinished.",
-                })
-
-            # -- Stale read warnings every 5 rounds --
-            if _round > 0 and _round % 5 == 0:
-                stale_warnings = evidence_tracker.check_stale_reads()
-                if stale_warnings:
-                    conversation.append({
-                        "role": "user",
-                        "content": "[SYSTEM] " + " ".join(stale_warnings),
-                    })
-
-            # Select model based on phase + escalation state
-            if model_escalated:
-                round_model = escalation_model  # loop detector escalated to hardcore
-            elif agent.phase == "planning":
-                round_model = planning_model    # hardcore for planning
-            else:
-                round_model = execution_model   # expert's preferred tier
-
-            # Track which model is used this round
-            evidence_tracker.record_model(round_model)
-            agent.current_model = round_model
-
-            _api_kwargs = dict(
-                model=round_model,
-                messages=conversation,
-                tools=agent_tools,
-                max_tokens=shared.MAX_TOKENS,
-            )
+            # -- API call --
+            _api_kwargs = dict(model=round_model, messages=conversation,
+                               tools=agent_tools, max_tokens=shared.MAX_TOKENS)
             if expert_temperature is not None:
                 _api_kwargs["temperature"] = float(expert_temperature)
             response = await shared._api_call_with_retry(
                 lambda: shared.client.chat.completions.create(**_api_kwargs),
                 label=f"Expert:{data['name']}({round_model})"
             )
+
+            # -- Record usage --
             if hasattr(response, 'usage') and response.usage:
                 pt = response.usage.prompt_tokens or 0
                 ct = response.usage.completion_tokens or 0
@@ -619,57 +513,25 @@ Rules:
                     + (cached / 1_000_000.0) * _cached_r
                     + (ct / 1_000_000.0) * _out_r
                 )
+                agent.cached_tokens_total += cached
 
-            # Track cached tokens on the agent
-            if hasattr(response, 'usage') and response.usage:
-                agent.cached_tokens_total += _extract_cached_tokens(response.usage)
-
-            # -- Cost guard: check session spending --
-            cost_delta = agent.cost_usd  # approximate
-            _cost_guard.record_cost(cost_delta / max(rounds_used, 1))
-            cost_actions = _cost_guard.check(shared.state.global_cost_usd)
-            for action in cost_actions:
-                if action.startswith("warn:"):
-                    notify(f"COST WARNING: session spending passed {action[5:]}", level="warning")
-                elif action == "pause_all":
-                    notify(f"COST LIMIT: session budget ${_cost_guard.session_budget_usd:.2f} exceeded -- pausing all agents", level="error")
-                    agent.transition(AgentState.PAUSED)
-                    if bus:
-                        bus.post(display_name, f"Session budget exceeded (${shared.state.global_cost_usd:.2f}/${_cost_guard.session_budget_usd:.2f})", kind="status")
-                    break
-                elif action.startswith("rate_alarm:"):
-                    notify(f"COST RATE ALARM: spending {action[11:]} -- consider pausing agents", level="warning")
-            if agent.state == AgentState.PAUSED:
-                break
-
-            if not agent.check_budget():
-                agent.transition(AgentState.PAUSED)
-                if bus:
-                    bus.post(display_name, f"Agent over budget after round {_round + 1}", recipient="*", kind="status")
+            # Guardrail: cost limits
+            if gp.check_cost_limits(rounds_used):
                 break
 
             choice = response.choices[0]
             msg = choice.message
 
+            # -- No tool calls: agent is done (or needs verification gate) --
             if not msg.tool_calls:
                 content = msg.content or ""
                 full_output += content
                 conversation.append({"role": "assistant", "content": content})
-
-                # Verification gate: if agent made file mutations but never ran tests,
-                # inject a prompt and give it one more round (once only)
-                if made_file_mutations and not ran_tests and not verification_prompted and _round < max_rounds - 1:
-                    verification_prompted = True
-                    conversation.append({
-                        "role": "user",
-                        "content": "[SYSTEM] You modified code files but have not run tests yet. "
-                                   "Run run_tests now to verify your changes work before finishing.",
-                    })
-                    shared._log(f"agent {display_name}: verification gate triggered (files changed, no tests run)")
-                    continue  # give it another round
-
+                if gp.check_verification_gate(_round, max_rounds, conversation):
+                    continue
                 break
 
+            # -- Process tool calls --
             agent.transition(AgentState.WORKING)
             conversation.append({
                 "role": "assistant",
@@ -685,8 +547,8 @@ Rules:
 
             shared._log(f"agent {display_name}: round {_round + 1}/{max_rounds} - {len(msg.tool_calls)} tools")
 
-            # Parse all tool calls first
-            parsed_tools: list[tuple] = []  # (tc_dict, tool_name, args)
+            # Parse tool calls
+            parsed_tools: list[tuple] = []
             for tc in msg.tool_calls:
                 tool_name = tc.function.name
                 try:
@@ -695,10 +557,7 @@ Rules:
                     try:
                         args = json.loads(_repair_json(tc.function.arguments))
                     except json.JSONDecodeError:
-                        conversation.append({
-                            "role": "tool", "tool_call_id": tc.id,
-                            "content": "Error: invalid JSON arguments",
-                        })
+                        conversation.append({"role": "tool", "tool_call_id": tc.id, "content": "Error: invalid JSON arguments"})
                         continue
 
                 if tool_name == "update_plan":
@@ -706,181 +565,67 @@ Rules:
                 elif tool_name == "spawn_agent":
                     args["_parent"] = display_name
 
-                # -- PlanGate: block tools during planning phase --
-                gate_error = PlanGate.check_tool_allowed(agent, tool_name)
+                # Guardrail: PlanGate check
+                gate_error = gp.check_tool(tool_name, args)
                 if gate_error:
-                    conversation.append({
-                        "role": "tool", "tool_call_id": tc.id,
-                        "content": gate_error,
-                    })
-                    shared._log(f"agent {display_name}: PlanGate blocked {tool_name}")
+                    conversation.append({"role": "tool", "tool_call_id": tc.id, "content": gate_error})
                     continue
 
-                tc_dict = {"id": tc.id, "name": tool_name}
-                parsed_tools.append((tc_dict, tool_name, args))
-
+                parsed_tools.append(({"id": tc.id, "name": tool_name}, tool_name, args))
                 detail = _tool_detail(tool_name, args)
                 shared._log(f"agent {display_name}: {tool_name}{detail}")
                 tool_actions.append(f"{tool_name}{detail}")
 
-                # Track file mutations and test runs
-                if tool_name in ("write_file", "edit_file"):
-                    made_file_mutations = True
-                elif tool_name == "run_tests":
-                    ran_tests = True
-
             # Execute tools — parallel for read-only, sequential otherwise
             all_read_only = all(n in READ_ONLY_TOOLS for _, n, _ in parsed_tools)
-            can_parallelize = all_read_only and len(parsed_tools) > 1
-
-            if can_parallelize:
-                shared._log(f"agent {display_name}: parallel executing {len(parsed_tools)} read-only tools")
-
+            if all_read_only and len(parsed_tools) > 1:
                 async def _run_one(tc_d, t_name, t_args):
                     agent.current_tool = t_name
                     try:
-                        result_str = await _execute_tool(t_name, t_args)
+                        r = await _execute_tool(t_name, t_args)
                     except Exception as e:
-                        result_str = f"Error: {e}"
-                    if len(result_str) > MAX_TOOL_RESULT_SIZE:
-                        result_str = result_str[:MAX_TOOL_RESULT_SIZE] + "\n... (truncated)"
-                    return tc_d, t_name, t_args, result_str
+                        r = f"Error: {e}"
+                    if len(r) > MAX_TOOL_RESULT_SIZE:
+                        r = r[:MAX_TOOL_RESULT_SIZE] + "\n... (truncated)"
+                    return tc_d, t_name, t_args, r
 
-                results = await asyncio.gather(*[_run_one(tc_d, tn, ta) for tc_d, tn, ta in parsed_tools])
+                results = await asyncio.gather(*[_run_one(d, n, a) for d, n, a in parsed_tools])
                 for tc_d, t_name, t_args, result_str in results:
-                    # -- Plan deviation warning --
-                    deviation = PlanGate.check_plan_deviation(agent, t_name, t_args)
+                    deviation = gp.on_tool_result(t_name, t_args, result_str, rounds_used)
                     if deviation:
                         result_str = deviation + "\n" + result_str
-
-                    # -- Record for loop detection, evidence tracking, and live log --
-                    loop_detector.record_tool_call(t_name, t_args, result_str)
-                    evidence_tracker.record_tool(rounds_used, t_name, t_args, result_str)
-                    _log_tool_call(agent, t_name, t_args, result_str, rounds_used)
-
-                    conversation.append({
-                        "role": "tool", "tool_call_id": tc_d["id"],
-                        "content": result_str,
-                    })
+                    conversation.append({"role": "tool", "tool_call_id": tc_d["id"], "content": result_str})
             else:
                 for tc_d, tool_name, args in parsed_tools:
                     agent.current_tool = tool_name
                     result_str = await _execute_tool(tool_name, args)
                     if len(result_str) > MAX_TOOL_RESULT_SIZE:
                         result_str = result_str[:MAX_TOOL_RESULT_SIZE] + "\n... (truncated)"
-
-                    # -- Plan deviation warning --
-                    deviation = PlanGate.check_plan_deviation(agent, tool_name, args)
+                    deviation = gp.on_tool_result(tool_name, args, result_str, rounds_used)
                     if deviation:
                         result_str = deviation + "\n" + result_str
-
-                    # -- Record for loop detection, evidence tracking, and live log --
-                    loop_detector.record_tool_call(tool_name, args, result_str)
-                    evidence_tracker.record_tool(rounds_used, tool_name, args, result_str)
-                    _log_tool_call(agent, tool_name, args, result_str, rounds_used)
-
-                    conversation.append({
-                        "role": "tool", "tool_call_id": tc_d["id"],
-                        "content": result_str,
-                    })
-
-                    # -- PlanGate: auto-transition after update_plan with ready plan --
-                    if tool_name == "update_plan" and agent.phase == "planning":
-                        if PlanGate.check_plan_ready(agent):
-                            # In trust/agent mode: auto-transition
-                            if shared.state.trust_mode or shared.state.agent_mode > 1:
-                                PlanGate.transition_to_executing(agent)
-                                notify(f"[{display_name}] Plan approved -- executing ({len(agent.plan)} steps)")
-                                shared._log(f"agent {display_name}: auto-transitioned to executing phase")
-                            else:
-                                # Post plan for user review and auto-approve
-                                # The user can still /reject to revert and send feedback
-                                plan_text = "\n".join(f"  {i+1}. {s['step']}" for i, s in enumerate(agent.plan))
-                                if bus:
-                                    bus.post(display_name, f"Plan ready:\n{plan_text}", kind="plan")
-                                notify(f"[{display_name}] Plan: {len(agent.plan)} steps -- /reject {display_name} <feedback> to revise")
-                                PlanGate.transition_to_executing(agent)
-                                shared._log(f"agent {display_name}: plan posted, auto-transitioned to executing")
+                    conversation.append({"role": "tool", "tool_call_id": tc_d["id"], "content": result_str})
 
             agent.current_tool = None
 
-            # -- Loop detection after each round --
-            loop_msg = loop_detector.check_loop()
-            if loop_msg:
-                loop_escalation_count += 1
-                shared._log(f"agent {display_name}: loop detected (escalation #{loop_escalation_count})")
-                notify(f"WARNING: {display_name} stuck in loop -- use /tell or /peek", level="warning")
-                shared.console.print(f"[bold yellow]WARNING: {display_name} loop detected (escalation #{loop_escalation_count})[/bold yellow]")
+            # Guardrail: loop detection + milestone notifications
+            if gp.on_round_end(_round, conversation):
+                break
 
-                if loop_escalation_count >= 3:
-                    # Pause agent after 3 loop escalations
-                    agent.transition(AgentState.PAUSED)
-                    pause_msg = f"Agent {display_name} paused: stuck in loop after 3 escalations. Use /tell {display_name} to provide guidance or /resume {display_name}."
-                    if bus:
-                        bus.post(display_name, pause_msg, kind="status")
-                    notify(pause_msg, level="error")
-                    shared.console.print(f"[bold red]{pause_msg}[/bold red]")
-                    break
-                elif loop_escalation_count == 1:
-                    # First escalation: upgrade model to hardcore for better reasoning
-                    model_escalated = True
-                    # Record the error for potential lesson learning
-                    if loop_detector.test_failures:
-                        loop_error_at_escalation = loop_detector.test_failures[-1]
-                    elif loop_detector.edit_targets:
-                        loop_error_at_escalation = f"repeated edits to {list(loop_detector.edit_targets.keys())[-1]}"
-                    # Check lessons DB for relevant prior solutions
-                    relevant = lessons_db.find_relevant(
-                        error_signature=loop_error_at_escalation,
-                        files=list(loop_detector.edit_targets.keys()),
-                    )
-                    lesson_hint = ""
-                    if relevant:
-                        lesson_hint = "\n\n" + lessons_db.format_for_prompt(relevant)
-                    shared._log(f"agent {display_name}: escalating to hardcore model after loop detection")
-                    notify(f"[{display_name}] Escalating to hardcore model after loop detection", level="warning")
-                    conversation.append({
-                        "role": "user",
-                        "content": f"[SYSTEM] {loop_msg}\n\n[MODEL ESCALATED] You are now running on a more powerful reasoning model. Use this opportunity to think more carefully about the problem.{lesson_hint}",
-                    })
-                else:
-                    # Second escalation: warn harder
-                    conversation.append({
-                        "role": "user",
-                        "content": f"[SYSTEM] {loop_msg}\n\n[FINAL WARNING] One more loop and you will be paused. Ask for help via send_message if needed.",
-                    })
-
-            # -- Milestone notifications: plan step completion --
-            if agent.plan:
-                done_count = sum(1 for s in agent.plan if s["status"] == "done")
-                total_count = len(agent.plan)
-                # Find recently completed steps
-                for step in agent.plan:
-                    if step["status"] == "done":
-                        step_key = f"_notified_{step['step'][:30]}"
-                        if not hasattr(agent, step_key):
-                            setattr(agent, step_key, True)
-                            notify(f"[{display_name}] completed: {step['step'][:60]} ({done_count}/{total_count})")
-
-        # -- Post-completion: GoalVerifier validation --
-        verification_result = GoalVerifier.validate_completion(agent, tool_actions, full_output)
-        verification_issues = verification_result.get("issues", [])
+        # -- Post-completion: verification + evidence + report --
+        ev_summary, verification_issues = gp.on_completion(tool_actions, full_output, rounds_used, max_rounds)
 
         if verification_issues and rounds_used < max_rounds:
-            # Give agent 2 more rounds to address issues
             issue_text = "; ".join(verification_issues)
-            conversation.append({
-                "role": "user",
-                "content": f"[SYSTEM] Completion verification found issues: {issue_text}. Address these now.",
-            })
+            conversation.append({"role": "user", "content": f"[SYSTEM] Completion verification found issues: {issue_text}. Address these now."})
             shared._log(f"agent {display_name}: verification issues, giving extra rounds: {issue_text}")
-            for _extra_round in range(min(2, max_rounds - rounds_used)):
+            execution_model = gp.execution_model
+            for _extra in range(min(2, max_rounds - rounds_used)):
                 rounds_used += 1
                 response = await shared._api_call_with_retry(
                     lambda: shared.client.chat.completions.create(
                         model=execution_model, messages=conversation,
-                        tools=agent_tools, max_tokens=shared.MAX_TOKENS,
-                    ),
+                        tools=agent_tools, max_tokens=shared.MAX_TOKENS),
                     label=f"Expert:{data['name']}:verification"
                 )
                 if hasattr(response, 'usage') and response.usage:
@@ -897,11 +642,9 @@ Rules:
                 if msg.tool_calls:
                     conversation.append({
                         "role": "assistant", "content": msg.content or None,
-                        "tool_calls": [
-                            {"id": tc.id, "type": "function",
-                             "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                            for tc in msg.tool_calls
-                        ],
+                        "tool_calls": [{"id": tc.id, "type": "function",
+                                        "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                                       for tc in msg.tool_calls],
                     })
                     for tc in msg.tool_calls:
                         try:
@@ -914,61 +657,21 @@ Rules:
                         if len(result_str) > MAX_TOOL_RESULT_SIZE:
                             result_str = result_str[:MAX_TOOL_RESULT_SIZE] + "\n... (truncated)"
                         conversation.append({"role": "tool", "tool_call_id": tc.id, "content": result_str})
-                        tool_actions.append(f"{tc.function.name}")
+                        tool_actions.append(tc.function.name)
                         if tc.function.name == "run_tests":
-                            ran_tests = True
+                            gp.ran_tests = True
                 else:
                     break
-            # Re-validate
-            verification_result = GoalVerifier.validate_completion(agent, tool_actions, full_output)
-            verification_issues = verification_result.get("issues", [])
+            ev_summary, verification_issues = gp.on_completion(tool_actions, full_output, rounds_used, max_rounds)
 
-        # -- Post-completion smoke test --
-        # Only run if mutations were made, tests weren't run, and we're not inside pytest
-        if made_file_mutations and not ran_tests and "pytest" not in sys.modules:
-            shared._log(f"agent {display_name}: post-completion smoke test (files mutated, no tests)")
-            try:
-                from grokswarm.tools_test import run_tests as _run_tests_fn
-                test_output = _run_tests_fn(None, None)
-                if "[FAIL]" in test_output:
-                    verification_issues.append("[REGRESSION WARNING] Post-completion test run failed")
-                    notify(f"[{display_name}] REGRESSION WARNING: post-completion tests failed", level="warning")
-            except Exception:
-                pass
-
-        # Evidence summary
-        ev_summary = evidence_tracker.get_evidence_summary()
-
-        # Structured completion report
+        # Build and post completion report
         report = _build_completion_report(
             display_name, tool_actions, rounds_used, max_rounds, full_output,
-            evidence_summary=ev_summary, verification_issues=verification_issues if verification_issues else None,
-        )
+            evidence_summary=ev_summary, verification_issues=verification_issues if verification_issues else None)
         save_memory(f"expert_{display_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}", report)
         if bus:
             bus.post(display_name, report, kind="result")
         agent.transition(AgentState.DONE)
-
-        # -- Cross-session learning: record lesson if we recovered from a loop --
-        if loop_escalation_count > 0 and ev_summary.get("last_test_status") == "PASS":
-            # Agent hit a loop but eventually succeeded — record what worked
-            fix_desc = full_output[-500:] if full_output else "Unknown fix"
-            files_involved = list(loop_detector.edit_targets.keys())
-            try:
-                lessons_db.record_lesson(
-                    error_signature=loop_error_at_escalation,
-                    fix_description=fix_desc,
-                    files_involved=files_involved,
-                    expert=data['name'],
-                )
-                shared._log(f"agent {display_name}: recorded lesson for '{loop_error_at_escalation[:50]}'")
-            except Exception:
-                pass  # best-effort
-
-        # Completion notification
-        test_status = ev_summary.get("last_test_status", "never_run")
-        models_info = ", ".join(f"{m}x{c}" for m, c in ev_summary.get("models_used", {}).items())
-        notify(f"[{display_name}] DONE -- {ev_summary.get('files_written', 0)} files changed, tests {test_status}, ${agent.cost_usd:.4f}, {rounds_used} rounds, models: {models_info or 'none'}")
 
         return full_output
     except Exception as e:

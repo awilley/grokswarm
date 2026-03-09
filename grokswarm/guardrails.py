@@ -791,3 +791,348 @@ def drain_notifications() -> list[tuple[str, str]]:
     except Exception:
         pass
     return items
+
+
+def _auto_print(message: str, level: str = "info"):
+    """Print a notification directly to the console AND queue it."""
+    notify(message, level)
+    try:
+        if level == "error":
+            shared.console.print(f"[bold red]{message}[/bold red]")
+        elif level == "warning":
+            shared.console.print(f"[bold yellow]{message}[/bold yellow]")
+        else:
+            shared.console.print(f"[dim]{message}[/dim]")
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# GuardrailPipeline: unified hook system for run_expert()
+# ---------------------------------------------------------------------------
+
+class GuardrailPipeline:
+    """Encapsulates all guardrail state and provides clean hook methods for the agent loop.
+
+    Usage in run_expert():
+        pipeline = GuardrailPipeline(agent, display_name, task_desc, data, bus)
+        # Before loop:
+        pipeline.setup(conversation)
+        # Each round:
+        pipeline.on_round_start(round_num, max_rounds, conversation)
+        model = pipeline.select_model()
+        # After API call:
+        should_stop = pipeline.on_api_response(response, round_num)
+        # Before each tool:
+        error = pipeline.check_tool(tool_name, args)
+        # After each tool:
+        pipeline.on_tool_result(tool_name, args, result, round_num, tc_id)
+        # After all tools in a round:
+        should_stop = pipeline.on_round_end(round_num, conversation)
+        # After loop:
+        pipeline.on_completion(tool_actions, full_output, rounds_used, max_rounds)
+    """
+
+    def __init__(self, agent, display_name: str, task_desc: str,
+                 expert_data: dict, bus=None):
+        self.agent = agent
+        self.display_name = display_name
+        self.task_desc = task_desc
+        self.expert_data = expert_data
+        self.bus = bus
+
+        # Sub-systems
+        self.loop_detector = LoopDetector()
+        self.evidence_tracker = EvidenceTracker()
+        self.lessons_db = LessonsDB()
+
+        # State
+        self.loop_escalation_count = 0
+        self.model_escalated = False
+        self.loop_error_at_escalation = ""
+        self.made_file_mutations = False
+        self.ran_tests = False
+        self.verification_prompted = False
+        self._step_notified: set[str] = set()
+
+        # Model routing
+        self.planning_model = ToolFilter.get_model_for_phase(expert_data, "planning")
+        self.execution_model = ToolFilter.get_model_for_phase(expert_data, "executing")
+        self.escalation_model = ToolFilter.get_model_for_escalation()
+
+    # -- Setup (before loop) --
+
+    def setup(self, conversation: list[dict]):
+        """Initialize guardrails: complexity skip, lessons injection."""
+        # Complexity-based planning skip
+        if TaskComplexity.should_skip_planning(self.task_desc):
+            self.agent.phase = "executing"
+            shared._log(f"agent {self.display_name}: simple task, skipping planning phase")
+
+        # Inject lessons from previous sessions
+        relevant_lessons = self.lessons_db.find_relevant(files=[])
+        if relevant_lessons:
+            lesson_text = self.lessons_db.format_for_prompt(relevant_lessons)
+            conversation.append({"role": "user", "content": lesson_text})
+
+    def get_tool_schemas(self):
+        """Get filtered tool schemas based on expert + dynamic tools."""
+        from grokswarm.tools_registry import get_agent_tool_schemas
+        allowed = ToolFilter.get_tools_for_expert(self.expert_data)
+        allowed = DynamicTools.merge_tools(allowed, self.task_desc)
+        return get_agent_tool_schemas(allowed_tools=allowed)
+
+    # -- Round hooks --
+
+    def on_round_start(self, round_num: int, max_rounds: int, conversation: list[dict]):
+        """Inject system messages at appropriate round milestones."""
+        pct = (round_num + 1) / max_rounds
+
+        # Goal anchoring at ~40%
+        if round_num > 0 and abs(pct - 0.4) < (1.0 / max_rounds):
+            conversation.append({
+                "role": "user",
+                "content": f'[SYSTEM] Checkpoint -- original goal: "{self.task_desc[:200]}". Are you on track? If not, adjust your plan.',
+            })
+
+        # Reflection at ~80%
+        reflection_round = int(max_rounds * 0.8)
+        if round_num == reflection_round and round_num > 2:
+            conversation.append({
+                "role": "user",
+                "content": GoalVerifier.build_reflection_prompt(self.task_desc),
+            })
+
+        # Final round warning
+        if round_num == max_rounds - 1:
+            conversation.append({
+                "role": "user",
+                "content": "[SYSTEM] This is your FINAL round. Wrap up now: summarize what you accomplished and what remains unfinished.",
+            })
+
+        # Stale read warnings every 5 rounds
+        if round_num > 0 and round_num % 5 == 0:
+            stale_warnings = self.evidence_tracker.check_stale_reads()
+            if stale_warnings:
+                conversation.append({
+                    "role": "user",
+                    "content": "[SYSTEM] " + " ".join(stale_warnings),
+                })
+
+    def select_model(self) -> str:
+        """Select the right model based on phase + escalation state."""
+        if self.model_escalated:
+            model = self.escalation_model
+        elif self.agent.phase == "planning":
+            model = self.planning_model
+        else:
+            model = self.execution_model
+        self.evidence_tracker.record_model(model)
+        self.agent.current_model = model
+        return model
+
+    def check_cost_limits(self, round_num: int) -> bool:
+        """Check cost guard and agent budget. Returns True if agent should stop."""
+        # Cost guard: session-level spending checks
+        cost_delta = self.agent.cost_usd
+        _cost_guard.record_cost(cost_delta / max(round_num + 1, 1))
+        cost_actions = _cost_guard.check(shared.state.global_cost_usd)
+        for action in cost_actions:
+            if action.startswith("warn:"):
+                _auto_print(f"COST WARNING: session spending passed {action[5:]}", level="warning")
+            elif action == "pause_all":
+                _auto_print(f"COST LIMIT: session budget ${_cost_guard.session_budget_usd:.2f} exceeded -- pausing all agents", level="error")
+                self.agent.transition(AgentState.PAUSED)
+                if self.bus:
+                    self.bus.post(self.display_name, f"Session budget exceeded (${shared.state.global_cost_usd:.2f}/${_cost_guard.session_budget_usd:.2f})", kind="status")
+                return True
+            elif action.startswith("rate_alarm:"):
+                _auto_print(f"COST RATE ALARM: spending {action[11:]} -- consider pausing agents", level="warning")
+
+        # Per-agent budget check
+        if not self.agent.check_budget():
+            self.agent.transition(AgentState.PAUSED)
+            if self.bus:
+                self.bus.post(self.display_name, f"Agent over budget after round {round_num + 1}", recipient="*", kind="status")
+            return True
+
+        return False
+
+    # -- Tool hooks --
+
+    def check_tool(self, tool_name: str, args: dict) -> str | None:
+        """Check if a tool call is allowed. Returns error message or None."""
+        gate_error = PlanGate.check_tool_allowed(self.agent, tool_name)
+        if gate_error:
+            shared._log(f"agent {self.display_name}: PlanGate blocked {tool_name}")
+        return gate_error
+
+    def _log_tool_call(self, tool_name: str, args: dict, result: str, round_num: int):
+        """Append to agent's rolling tool call log for /peek visibility."""
+        args_summary = ""
+        if tool_name in ("read_file", "write_file", "edit_file"):
+            args_summary = args.get("path", "")
+        elif tool_name == "run_tests":
+            args_summary = args.get("command", "default")
+        elif tool_name == "run_shell":
+            args_summary = args.get("command", "")[:60]
+        elif tool_name == "update_plan":
+            args_summary = f"{len(args.get('steps', []))} steps"
+        else:
+            args_summary = str(list(args.keys()))[:40]
+        result_preview = result[:120].replace("\n", " ")
+        self.agent.tool_call_log.append({
+            "tool": tool_name, "args": args_summary,
+            "result": result_preview, "round": round_num,
+        })
+        if len(self.agent.tool_call_log) > 10:
+            self.agent.tool_call_log = self.agent.tool_call_log[-10:]
+
+    def on_tool_result(self, tool_name: str, args: dict, result: str, round_num: int):
+        """Record tool result for loop detection, evidence tracking, and live log."""
+        # Plan deviation warning (prepended to result by caller)
+        deviation = PlanGate.check_plan_deviation(self.agent, tool_name, args)
+
+        # Record in all trackers
+        self.loop_detector.record_tool_call(tool_name, args, result)
+        self.evidence_tracker.record_tool(round_num, tool_name, args, result)
+        self._log_tool_call(tool_name, args, result, round_num)
+
+        # Track mutations and test runs
+        if tool_name in ("write_file", "edit_file"):
+            self.made_file_mutations = True
+        elif tool_name == "run_tests":
+            self.ran_tests = True
+
+        # Auto-transition from planning to executing after update_plan
+        if tool_name == "update_plan" and self.agent.phase == "planning":
+            if PlanGate.check_plan_ready(self.agent):
+                if shared.state.trust_mode or shared.state.agent_mode > 1:
+                    PlanGate.transition_to_executing(self.agent)
+                    _auto_print(f"[{self.display_name}] Plan approved -- executing ({len(self.agent.plan)} steps)")
+                    shared._log(f"agent {self.display_name}: auto-transitioned to executing phase")
+                else:
+                    plan_text = "\n".join(f"  {i+1}. {s['step']}" for i, s in enumerate(self.agent.plan))
+                    if self.bus:
+                        self.bus.post(self.display_name, f"Plan ready:\n{plan_text}", kind="plan")
+                    _auto_print(f"[{self.display_name}] Plan: {len(self.agent.plan)} steps -- /reject {self.display_name} <feedback> to revise")
+                    PlanGate.transition_to_executing(self.agent)
+                    shared._log(f"agent {self.display_name}: plan posted, auto-transitioned to executing")
+
+        return deviation
+
+    def check_verification_gate(self, round_num: int, max_rounds: int, conversation: list[dict]) -> bool:
+        """Check if agent should be forced to run tests. Returns True to continue loop."""
+        if self.made_file_mutations and not self.ran_tests and not self.verification_prompted and round_num < max_rounds - 1:
+            self.verification_prompted = True
+            conversation.append({
+                "role": "user",
+                "content": "[SYSTEM] You modified code files but have not run tests yet. "
+                           "Run run_tests now to verify your changes work before finishing.",
+            })
+            shared._log(f"agent {self.display_name}: verification gate triggered")
+            return True
+        return False
+
+    def on_round_end(self, round_num: int, conversation: list[dict]) -> bool:
+        """Check for loops after each round. Returns True if agent should stop."""
+        # Loop detection
+        loop_msg = self.loop_detector.check_loop()
+        if loop_msg:
+            self.loop_escalation_count += 1
+            shared._log(f"agent {self.display_name}: loop detected (escalation #{self.loop_escalation_count})")
+            _auto_print(f"WARNING: {self.display_name} stuck in loop (escalation #{self.loop_escalation_count})", level="warning")
+
+            if self.loop_escalation_count >= 3:
+                self.agent.transition(AgentState.PAUSED)
+                pause_msg = f"Agent {self.display_name} paused: stuck in loop after 3 escalations. Use /tell {self.display_name} to provide guidance or /resume {self.display_name}."
+                if self.bus:
+                    self.bus.post(self.display_name, pause_msg, kind="status")
+                _auto_print(pause_msg, level="error")
+                return True
+            elif self.loop_escalation_count == 1:
+                self.model_escalated = True
+                if self.loop_detector.test_failures:
+                    self.loop_error_at_escalation = self.loop_detector.test_failures[-1]
+                elif self.loop_detector.edit_targets:
+                    self.loop_error_at_escalation = f"repeated edits to {list(self.loop_detector.edit_targets.keys())[-1]}"
+                relevant = self.lessons_db.find_relevant(
+                    error_signature=self.loop_error_at_escalation,
+                    files=list(self.loop_detector.edit_targets.keys()),
+                )
+                lesson_hint = ""
+                if relevant:
+                    lesson_hint = "\n\n" + self.lessons_db.format_for_prompt(relevant)
+                _auto_print(f"[{self.display_name}] Escalating to hardcore model after loop detection", level="warning")
+                conversation.append({
+                    "role": "user",
+                    "content": f"[SYSTEM] {loop_msg}\n\n[MODEL ESCALATED] You are now running on a more powerful reasoning model. Use this opportunity to think more carefully about the problem.{lesson_hint}",
+                })
+            else:
+                conversation.append({
+                    "role": "user",
+                    "content": f"[SYSTEM] {loop_msg}\n\n[FINAL WARNING] One more loop and you will be paused. Ask for help via send_message if needed.",
+                })
+
+        # Milestone notifications for plan steps
+        if self.agent.plan:
+            done_count = sum(1 for s in self.agent.plan if s["status"] == "done")
+            total_count = len(self.agent.plan)
+            for step in self.agent.plan:
+                if step["status"] == "done":
+                    step_key = step['step'][:30]
+                    if step_key not in self._step_notified:
+                        self._step_notified.add(step_key)
+                        _auto_print(f"[{self.display_name}] completed: {step['step'][:60]} ({done_count}/{total_count})")
+
+        return False
+
+    # -- Completion --
+
+    def on_completion(self, tool_actions: list[str], full_output: str,
+                      rounds_used: int, max_rounds: int) -> tuple[dict, list[str]]:
+        """Run post-completion verification. Returns (evidence_summary, verification_issues)."""
+        import sys
+
+        verification_result = GoalVerifier.validate_completion(self.agent, tool_actions, full_output)
+        verification_issues = verification_result.get("issues", [])
+
+        # Post-completion smoke test
+        if self.made_file_mutations and not self.ran_tests and "pytest" not in sys.modules:
+            shared._log(f"agent {self.display_name}: post-completion smoke test")
+            try:
+                from grokswarm.tools_test import run_tests as _run_tests_fn
+                test_output = _run_tests_fn(None, None)
+                if "[FAIL]" in test_output:
+                    verification_issues.append("[REGRESSION WARNING] Post-completion test run failed")
+                    _auto_print(f"[{self.display_name}] REGRESSION WARNING: post-completion tests failed", level="warning")
+            except Exception:
+                pass
+
+        ev_summary = self.evidence_tracker.get_evidence_summary()
+
+        # Cross-session learning
+        if self.loop_escalation_count > 0 and ev_summary.get("last_test_status") == "PASS":
+            fix_desc = full_output[-500:] if full_output else "Unknown fix"
+            files_involved = list(self.loop_detector.edit_targets.keys())
+            try:
+                self.lessons_db.record_lesson(
+                    error_signature=self.loop_error_at_escalation,
+                    fix_description=fix_desc,
+                    files_involved=files_involved,
+                    expert=self.expert_data.get('name', ''),
+                )
+                shared._log(f"agent {self.display_name}: recorded lesson for '{self.loop_error_at_escalation[:50]}'")
+            except Exception:
+                pass
+
+        # Completion notification
+        test_status = ev_summary.get("last_test_status", "never_run")
+        models_info = ", ".join(f"{m}x{c}" for m, c in ev_summary.get("models_used", {}).items())
+        _auto_print(f"[{self.display_name}] DONE -- {ev_summary.get('files_written', 0)} files changed, tests {test_status}, ${self.agent.cost_usd:.4f}, {rounds_used} rounds")
+
+        return ev_summary, verification_issues
+
+
+# Singleton cost guard for session-level cost tracking
+_cost_guard = CostGuard()
