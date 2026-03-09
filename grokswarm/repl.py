@@ -24,74 +24,72 @@ import grokswarm.shared as shared
 from grokswarm.models import AgentState
 from grokswarm.context import (
     scan_project_context, scan_project_context_cached, _save_context_cache,
-    build_system_prompt, _safe_path,
+    build_system_prompt,
 )
-from grokswarm.tools_fs import list_dir, read_file, write_file, search_files, grep_files
-from grokswarm.tools_shell import run_shell
-from grokswarm.tools_test import run_tests
-from grokswarm.tools_git import git_status, git_diff, git_log, git_branch
-from grokswarm.tools_search import web_search, x_search
-from grokswarm.tools_browser import fetch_page
-from grokswarm.registry_helpers import list_experts, list_skills, list_memory, prune_memory
 from grokswarm.engine import _stream_with_tools, _trim_conversation
-from grokswarm.agents import (
-    get_bus, run_supervisor, run_expert, _load_project_costs,
-    _list_agents_impl,
-)
-from grokswarm.guardrails import (
-    PlanGate, Orchestrator, drain_notifications,
-    get_model_tiers, set_model_tier, reset_model_tiers, _VALID_TIERS,
-)
+from grokswarm.agents import get_bus, _load_project_costs
+from grokswarm.guardrails import Orchestrator, drain_notifications
 from grokswarm.cmd_dispatch import CmdEntry, CmdContext, register as _cmd, get_command, all_commands, busy_allowed_set
+from grokswarm.cmd_handlers import (
+    handle_quit, handle_help, handle_clear, handle_context, handle_session,
+    handle_list, handle_read, handle_write, handle_run, handle_search, handle_grep,
+    handle_swarm, handle_experts, handle_skills, handle_git, handle_web, handle_x,
+    handle_browse, handle_test, handle_undo, handle_trust, handle_readonly,
+    handle_verbose, handle_project, handle_doctor, handle_dashboard, handle_metrics,
+    handle_watch, handle_tell, handle_abort, handle_clear_swarm, handle_agents,
+    handle_peek, handle_pause, handle_resume, handle_approve, handle_reject,
+    handle_tasks, handle_budget, handle_model, handle_bugs, handle_memory,
+    handle_eval, handle_self_improve,
+)
 
 # ---------------------------------------------------------------------------
-# Command Registration (metadata only — handlers are bound later in _chat_async)
+# Command Registration — handlers wired to cmd_handlers.py
 # ---------------------------------------------------------------------------
 # fmt: off
-_cmd("quit",         "Exit",                              aliases=["exit", "q"])(lambda arg, ctx: None)
-_cmd("help",         "Show this help")(lambda arg, ctx: None)
-_cmd("clear",        "Clear conversation & screen")(lambda arg, ctx: None)
-_cmd("context",      "Show project context (refresh to rescan)")(lambda arg, ctx: None)
-_cmd("session",      "Manage sessions (list/save/load/delete)")(lambda arg, ctx: None)
-_cmd("list",         "List project directory")(lambda arg, ctx: None)
-_cmd("read",         "Read file contents")(lambda arg, ctx: None)
-_cmd("write",        "Write/create file (with approval)")(lambda arg, ctx: None)
-_cmd("run",          "Run shell command (with approval)")(lambda arg, ctx: None)
-_cmd("search",       "Search files by name in project")(lambda arg, ctx: None)
-_cmd("grep",         "Search inside files for text")(lambda arg, ctx: None)
-_cmd("swarm",        "Run multi-agent supervisor",         allow_while_busy=False)(lambda arg, ctx: None)
-_cmd("experts",      "List available experts")(lambda arg, ctx: None)
-_cmd("skills",       "List available skills")(lambda arg, ctx: None)
-_cmd("git",          "Git status (log, diff, branch)")(lambda arg, ctx: None)
-_cmd("web",          "Search the web (xAI live)")(lambda arg, ctx: None)
-_cmd("x",            "Search X/Twitter posts (xAI live)")(lambda arg, ctx: None)
-_cmd("browse",       "Fetch URL content (Playwright)")(lambda arg, ctx: None)
-_cmd("test",         "Run project tests (auto-detect)")(lambda arg, ctx: None)
-_cmd("undo",         "Undo last file edit (multi-level)")(lambda arg, ctx: None)
-_cmd("trust",        "Toggle trust mode (auto-approve)")(lambda arg, ctx: None)
-_cmd("readonly",     "Toggle read-only mode (block writes)")(lambda arg, ctx: None)
-_cmd("verbose",      "Toggle output detail (compact/full)")(lambda arg, ctx: None)
-_cmd("project",      "Switch project directory")(lambda arg, ctx: None)
-_cmd("doctor",       "Check environment health")(lambda arg, ctx: None)
-_cmd("dashboard",    "Open live TUI dashboard")(lambda arg, ctx: None)
-_cmd("metrics",      "Show token usage and cost metrics")(lambda arg, ctx: None)
-_cmd("watch",        "Live monitor for running agents")(lambda arg, ctx: None)
-_cmd("tell",         "Send guidance to a running agent")(lambda arg, ctx: None)
-_cmd("abort",        "Abort currently running swarm")(lambda arg, ctx: None)
-_cmd("clear-swarm",  "Clear stale swarm data")(lambda arg, ctx: None)
-_cmd("agents",       "List active agents and states")(lambda arg, ctx: None)
-_cmd("peek",         "View agent plan/progress")(lambda arg, ctx: None)
-_cmd("pause",        "Pause a running agent")(lambda arg, ctx: None)
-_cmd("resume",       "Resume a paused agent")(lambda arg, ctx: None)
-_cmd("approve",      "Approve agent plan")(lambda arg, ctx: None)
-_cmd("reject",       "Reject plan and send feedback")(lambda arg, ctx: None)
-_cmd("tasks",        "Show orchestrator task DAG")(lambda arg, ctx: None)
-_cmd("budget",       "Set/view session cost limit")(lambda arg, ctx: None)
-_cmd("model",        "View/set model tiers")(lambda arg, ctx: None)
-_cmd("bugs",         "View/manage bugs")(lambda arg, ctx: None)
-_cmd("self-improve", "Improve own source (shadow + test)",  allow_while_busy=False)(lambda arg, ctx: None)
-_cmd("memory",       "View/prune agent memory files")(lambda arg, ctx: None)
-_cmd("eval",         "Run evaluation harness",              allow_while_busy=False)(lambda arg, ctx: None)
+_cmd("quit",         "Exit",                              aliases=["exit", "q"])(handle_quit)
+_cmd("help",         "Show this help")(handle_help)
+_cmd("clear",        "Clear conversation & screen")(handle_clear)
+_cmd("context",      "Show project context (refresh to rescan)")(handle_context)
+_cmd("session",      "Manage sessions (list/save/load/delete)")(handle_session)
+_cmd("list",         "List project directory")(handle_list)
+_cmd("read",         "Read file contents")(handle_read)
+_cmd("write",        "Write/create file (with approval)")(handle_write)
+_cmd("run",          "Run shell command (with approval)")(handle_run)
+_cmd("search",       "Search files by name in project")(handle_search)
+_cmd("grep",         "Search inside files for text")(handle_grep)
+_cmd("swarm",        "Run multi-agent supervisor",         allow_while_busy=False)(handle_swarm)
+_cmd("experts",      "List available experts")(handle_experts)
+_cmd("skills",       "List available skills")(handle_skills)
+_cmd("git",          "Git status (log, diff, branch)")(handle_git)
+_cmd("web",          "Search the web (xAI live)")(handle_web)
+_cmd("x",            "Search X/Twitter posts (xAI live)")(handle_x)
+_cmd("browse",       "Fetch URL content (Playwright)")(handle_browse)
+_cmd("test",         "Run project tests (auto-detect)")(handle_test)
+_cmd("undo",         "Undo last file edit (multi-level)")(handle_undo)
+_cmd("trust",        "Toggle trust mode (auto-approve)")(handle_trust)
+_cmd("readonly",     "Toggle read-only mode (block writes)")(handle_readonly)
+_cmd("verbose",      "Toggle output detail (compact/full)")(handle_verbose)
+_cmd("project",      "Switch project directory")(handle_project)
+_cmd("doctor",       "Check environment health")(handle_doctor)
+_cmd("dashboard",    "Open live TUI dashboard")(handle_dashboard)
+_cmd("metrics",      "Show token usage and cost metrics")(handle_metrics)
+_cmd("watch",        "Live monitor for running agents")(handle_watch)
+_cmd("tell",         "Send guidance to a running agent")(handle_tell)
+_cmd("abort",        "Abort currently running swarm")(handle_abort)
+_cmd("clear-swarm",  "Clear stale swarm data")(handle_clear_swarm)
+_cmd("agents",       "List active agents and states")(handle_agents)
+_cmd("peek",         "View agent plan/progress")(handle_peek)
+_cmd("pause",        "Pause a running agent")(handle_pause)
+_cmd("resume",       "Resume a paused agent")(handle_resume)
+_cmd("approve",      "Approve agent plan")(handle_approve)
+_cmd("reject",       "Reject plan and send feedback")(handle_reject)
+_cmd("tasks",        "Show orchestrator task DAG")(handle_tasks)
+_cmd("budget",       "Set/view session cost limit")(handle_budget)
+_cmd("model",        "View/set model tiers")(handle_model)
+_cmd("bugs",         "View/manage bugs")(handle_bugs)
+_cmd("self-improve", "Improve own source (shadow + test)",  allow_while_busy=False)(handle_self_improve)
+_cmd("memory",       "View/prune agent memory files")(handle_memory)
+_cmd("eval",         "Run evaluation harness",              allow_while_busy=False)(handle_eval)
 # fmt: on
 
 # -- Context-Aware Tab Completion --
@@ -865,7 +863,7 @@ async def _chat_async(session_name: str | None = None):
                 for l in lines[1:]:
                     shared.console.print(f"  [dim]\u00b7 [/dim]{l}")
 
-                # -- Slash Commands --
+                # -- Slash Commands (dispatched via cmd_dispatch registry) --
                 if user_input.startswith("/"):
                     parts = user_input.split(maxsplit=1)
                     cmd = parts[0][1:].lower()
@@ -875,602 +873,21 @@ async def _chat_async(session_name: str | None = None):
                         shared.console.print("[swarm.dim]Busy processing previous prompt. Wait, or use /abort.[/swarm.dim]")
                         continue
 
-                    if cmd in ["quit", "exit", "q"]:
-                        if session_name:
-                            save_session(session_name, conversation)
-                            shared.console.print(f"[swarm.dim]Session '{session_name}' saved.[/swarm.dim]")
-                        shared.console.print("[swarm.dim]Goodbye.[/swarm.dim]")
-                        break
-                    elif cmd == "help":
-                        _show_help()
-                    elif cmd == "clear":
-                        conversation = [{"role": "system", "content": shared.SYSTEM_PROMPT}]
-                        os.system("cls" if os.name == "nt" else "clear")
-                        show_welcome()
-                    elif cmd == "context":
-                        _show_context(arg)
-                        if arg == "refresh":
-                            shared.console.print("[swarm.dim]  refreshing context...[/swarm.dim]")
-                            shared.PROJECT_CONTEXT = await asyncio.to_thread(scan_project_context, shared.PROJECT_DIR)
-                            await asyncio.to_thread(_save_context_cache, shared.PROJECT_DIR, shared.PROJECT_CONTEXT)
-                            shared.SYSTEM_PROMPT = build_system_prompt(shared.PROJECT_CONTEXT)
-                            conversation[0] = {"role": "system", "content": shared.SYSTEM_PROMPT}
-                    elif cmd == "session":
-                        result = _handle_session_command(arg, conversation, session_name)
-                        if result:
-                            session_name = result
-                    elif cmd == "list":
-                        shared.console.print(list_dir(arg or "."))
-                    elif cmd == "read":
-                        if not arg:
-                            shared.console.print("[swarm.warning]Usage: /read <file>[/swarm.warning]")
-                        else:
-                            shared.console.print(read_file(arg))
-                    elif cmd == "write":
-                        if not arg:
-                            shared.console.print("[swarm.warning]Usage: /write <file>[/swarm.warning]")
-                        else:
-                            file_path = arg.split(maxsplit=1)[0]
-                            shared.console.print("[swarm.dim]Enter content (type END on a new line to finish):[/swarm.dim]")
-                            _lines = []
-                            while True:
-                                line = await session.prompt_async("  ")
-                                if line.strip() == "END":
-                                    break
-                                _lines.append(line)
-                            shared.console.print(write_file(file_path, "\n".join(_lines)))
-                    elif cmd == "run":
-                        if not arg:
-                            shared.console.print("[swarm.warning]Usage: /run <command>[/swarm.warning]")
-                        else:
-                            shared.console.print(run_shell(arg))
-                    elif cmd == "search":
-                        if not arg:
-                            shared.console.print("[swarm.warning]Usage: /search <query>[/swarm.warning]")
-                        else:
-                            shared.console.print(search_files(arg))
-                    elif cmd == "grep":
-                        if not arg:
-                            shared.console.print("[swarm.warning]Usage: /grep <pattern> [path]  (quote multi-word patterns)[/swarm.warning]")
-                        else:
-                            if arg.startswith('"') or arg.startswith("'"):
-                                quote = arg[0]
-                                end = arg.find(quote, 1)
-                                if end > 0:
-                                    grep_pattern = arg[1:end]
-                                    rest = arg[end+1:].strip()
-                                    grep_path = rest if rest else "."
-                                else:
-                                    grep_pattern = arg[1:]
-                                    grep_path = "."
-                            else:
-                                grep_parts = arg.split(maxsplit=1)
-                                grep_pattern = grep_parts[0]
-                                grep_path = grep_parts[1] if len(grep_parts) > 1 else "."
-                            shared.console.print(grep_files(grep_pattern, grep_path))
-                    elif cmd == "swarm":
-                        if not arg:
-                            shared.console.print("[swarm.warning]Usage: /swarm <task>[/swarm.warning]")
-                        else:
-                            await _swarm_async(arg)
-                    elif cmd == "experts":
-                        experts_list_cmd()
-                    elif cmd == "skills":
-                        skills_list_cmd()
-                    elif cmd == "git":
-                        if not arg:
-                            shared.console.print(git_status())
-                        elif arg.startswith("log"):
-                            count_str = arg.split(maxsplit=1)[1] if len(arg.split()) > 1 else "10"
-                            shared.console.print(git_log(int(count_str) if count_str.isdigit() else 10))
-                        elif arg.startswith("diff"):
-                            diff_path = arg.split(maxsplit=1)[1] if len(arg.split()) > 1 else None
-                            shared.console.print(git_diff(diff_path))
-                        elif arg.startswith("branch"):
-                            branch_name = arg.split(maxsplit=1)[1] if len(arg.split()) > 1 else None
-                            shared.console.print(git_branch(branch_name))
-                        else:
-                            shared.console.print("[swarm.dim]Usage: /git [log|diff|branch] [args][/swarm.dim]")
-                    elif cmd == "web":
-                        if not arg:
-                            shared.console.print("[swarm.warning]Usage: /web <query>[/swarm.warning]")
-                        else:
-                            shared.console.print(f"[swarm.dim]Searching web: {arg}...[/swarm.dim]")
-                            shared.console.print(web_search(arg))
-                    elif cmd == "x":
-                        if not arg:
-                            shared.console.print("[swarm.warning]Usage: /x <query>[/swarm.warning]")
-                        else:
-                            shared.console.print(f"[swarm.dim]Searching X: {arg}...[/swarm.dim]")
-                            shared.console.print(x_search(arg))
-                    elif cmd == "browse":
-                        if not arg:
-                            shared.console.print("[swarm.warning]Usage: /browse <url>[/swarm.warning]")
-                        else:
-                            shared.console.print(f"[swarm.dim]Fetching {arg}...[/swarm.dim]")
-                            shared.console.print(fetch_page(arg))
-                    elif cmd == "test":
-                        shared.console.print(run_tests(arg if arg else None))
-                    elif cmd == "undo":
-                        if not shared.state.edit_history:
-                            shared.console.print("[swarm.warning]Nothing to undo. No edit history.[/swarm.warning]")
-                        else:
-                            undo_path, undo_content = shared.state.edit_history[-1]
-                            if undo_content is None:
-                                shared.console.print(f"[bold yellow]Undo file creation:[/bold yellow] {undo_path}")
-                                shared.console.print(f"[dim]Edit history depth: {len(shared.state.edit_history)}[/dim]")
-                                if shared._terminal_confirm("Delete this newly created file?", default=False):
-                                    fp = _safe_path(undo_path)
-                                    if fp and fp.is_file():
-                                        fp.unlink()
-                                        shared.state.edit_history.pop()
-                                        shared.console.print(f"[swarm.accent]Deleted {undo_path} (history: {len(shared.state.edit_history)} remaining)[/swarm.accent]")
-                                    elif fp:
-                                        shared.console.print("[swarm.error]File no longer exists.[/swarm.error]")
-                                        shared.state.edit_history.pop()
-                                    else:
-                                        shared.console.print("[swarm.error]Cannot undo: path outside project.[/swarm.error]")
-                                else:
-                                    shared.console.print("[swarm.dim]Undo cancelled.[/swarm.dim]")
-                            else:
-                                shared.console.print(f"[bold yellow]Undo last edit to:[/bold yellow] {undo_path}")
-                                shared.console.print(f"[dim]Edit history depth: {len(shared.state.edit_history)}[/dim]")
-                                if shared._terminal_confirm("Restore previous content?", default=False):
-                                    fp = _safe_path(undo_path)
-                                    if fp:
-                                        fp.write_text(undo_content, encoding="utf-8")
-                                        shared.state.edit_history.pop()
-                                        shared.console.print(f"[swarm.accent]Restored {undo_path} (history: {len(shared.state.edit_history)} remaining)[/swarm.accent]")
-                                    else:
-                                        shared.console.print("[swarm.error]Cannot restore: path outside project.[/swarm.error]")
-                                else:
-                                    shared.console.print("[swarm.dim]Undo cancelled.[/swarm.dim]")
-                    elif cmd == "trust":
-                        shared.state.trust_mode = not shared.state.trust_mode
-                        trust_state = "ON" if shared.state.trust_mode else "OFF"
-                        color = "bold green" if shared.state.trust_mode else "bold red"
-                        shared.console.print(f"[{color}]Trust mode: {trust_state}[/{color}]")
-                        if shared.state.trust_mode:
-                            shared.console.print("[swarm.dim]Non-dangerous ops will be auto-approved. Shell + destructive git still gated.[/swarm.dim]")
-                    elif cmd == "readonly":
-                        shared.state.read_only = not shared.state.read_only
-                        ro_state = "ON" if shared.state.read_only else "OFF"
-                        color = "bold yellow" if shared.state.read_only else "bold green"
-                        shared.console.print(f"[{color}]Read-only mode: {ro_state}[/{color}]")
-                        if shared.state.read_only:
-                            shared.console.print("[swarm.dim]All file-mutating tools are blocked. Use /readonly again to unlock.[/swarm.dim]")
-                    elif cmd == "verbose":
-                        shared.state.verbose_mode = not shared.state.verbose_mode
-                        label = "full" if shared.state.verbose_mode else "compact"
-                        shared.console.print(f"[swarm.accent]Output mode: [bold]{label}[/bold][/swarm.accent]")
-                        shared.console.print("[dim]  compact = one-line status per tool round[/dim]")
-                        shared.console.print("[dim]  full    = detailed tool names, args, timing[/dim]")
-                    elif cmd == "project":
-                        if not arg or arg == "list":
-                            recents = _load_recent_projects()
-                            if recents:
-                                shared.console.print("[swarm.accent]Recent projects:[/swarm.accent]")
-                                for i, rp in enumerate(recents, 1):
-                                    marker = " [bold](current)[/bold]" if rp == str(shared.PROJECT_DIR.resolve()) else ""
-                                    shared.console.print(f"  [bold]{i}.[/bold] {rp}{marker}")
-                            else:
-                                shared.console.print("[swarm.dim]No recent projects.[/swarm.dim]")
-                        else:
-                            target = arg.strip()
-                            if target.isdigit():
-                                recents = _load_recent_projects()
-                                idx = int(target) - 1
-                                if 0 <= idx < len(recents):
-                                    target = recents[idx]
-                                else:
-                                    shared.console.print("[swarm.error]Invalid project number.[/swarm.error]")
-                                    continue
-                            if await _switch_project_async(target):
-                                conversation[0] = {"role": "system", "content": shared.SYSTEM_PROMPT}
-                    elif cmd == "doctor":
-                        _run_doctor()
-                    elif cmd == "dashboard":
-                        dashboard()
-                    elif cmd == "metrics":
-                        metrics = get_bus().get_metrics()
-                        shared.console.print()
-                        shared.console.print("[swarm.accent]Session Metrics[/swarm.accent]")
-                        shared.console.print(f"  [bold]Prompt Tokens:[/bold]     {metrics['prompt_tokens']:,}")
-                        shared.console.print(f"  [bold]Completion Tokens:[/bold] {metrics['completion_tokens']:,}")
-                        shared.console.print(f"  [bold]Cached Tokens:[/bold]     {metrics.get('cached_tokens', 0):,}")
-                        shared.console.print(f"  [bold]Total Tokens:[/bold]      {metrics['total_tokens']:,}")
-                        # Cache ratio
-                        s_cached = metrics.get('cached_tokens', 0)
-                        s_prompt = metrics['prompt_tokens']
-                        if s_prompt > 0 and s_cached > 0:
-                            cache_pct = (s_cached / s_prompt) * 100
-                            shared.console.print(f"  [bold]Cache Hit Rate:[/bold]   {cache_pct:.1f}%")
-                        shared.console.print()
-                        shared.console.print("[swarm.accent]Project Totals (all sessions)[/swarm.accent]")
-                        ptot = shared.state.project_prompt_tokens + shared.state.project_completion_tokens
-                        shared.console.print(f"  [bold]Prompt Tokens:[/bold]     {shared.state.project_prompt_tokens:,}")
-                        shared.console.print(f"  [bold]Completion Tokens:[/bold] {shared.state.project_completion_tokens:,}")
-                        shared.console.print(f"  [bold]Cached Tokens:[/bold]     {shared.state.project_cached_tokens:,}")
-                        shared.console.print(f"  [bold]Total Tokens:[/bold]      {ptot:,}")
-                        shared.console.print(f"  [bold]Total Cost:[/bold]        ${shared.state.project_cost_usd:.4f}")
-                        # Show estimated savings from caching
-                        p_cached = shared.state.project_cached_tokens
-                        if p_cached > 0:
-                            # Savings = cached_tokens * (full_rate - cached_rate) / 1M
-                            # Using default rates as approximation
-                            savings = (p_cached / 1_000_000.0) * (0.20 - 0.05)
-                            shared.console.print(f"  [bold green]Cache Savings:[/bold green]   ~${savings:.4f}")
-                            cache_pct = (p_cached / shared.state.project_prompt_tokens) * 100 if shared.state.project_prompt_tokens > 0 else 0
-                            shared.console.print(f"  [bold]Cache Hit Rate:[/bold]   {cache_pct:.1f}%")
-                        shared.console.print()
-                    elif cmd == "watch":
-                        await _watch_agents(auto_exit=False)
-                    elif cmd == "tell":
-                        if not arg:
-                            shared.console.print("[swarm.dim]Usage: /tell <agent_name> <message>[/swarm.dim]")
-                        else:
-                            tell_parts = arg.split(maxsplit=1)
-                            if len(tell_parts) < 2:
-                                shared.console.print("[swarm.dim]Usage: /tell <agent_name> <message>[/swarm.dim]")
-                            else:
-                                tell_target, tell_msg = tell_parts
-                                get_bus().post("user", tell_msg, recipient=tell_target, kind="nudge")
-                                shared.console.print(f"[swarm.accent]Sent nudge to '{tell_target}':[/swarm.accent] {tell_msg}")
-                    elif cmd == "abort":
-                        from grokswarm.commands import abort as abort_cmd
-                        abort_cmd()
-                    elif cmd == "clear-swarm":
-                        shared.state.clear_swarm()
-                        get_bus().clear()
-                        shared.console.print("[bold green]Swarm state cleared:[/bold green] agents, bus messages, and background tasks reset.")
-                    elif cmd == "agents":
-                        shared.console.print(_list_agents_impl())
-                    elif cmd == "peek":
-                        if shared.state.agents:
-                            targets = {}
-                            if arg and arg.strip():
-                                a = shared.state.get_agent(arg.strip())
-                                if a is None:
-                                    shared.console.print(f"[red]Agent '{arg.strip()}' not found.[/red]")
-                                else:
-                                    targets[arg.strip()] = a
-                            else:
-                                targets = dict(shared.state.agents)
-                            for aname, agent in targets.items():
-                                # Agent status header
-                                model_short = (agent.current_model or "?").split("-")[-1][:20]
-                                cache_pct = f"{(agent.cached_tokens_total / max(agent.tokens_used, 1)) * 100:.0f}%" if agent.tokens_used else "n/a"
-                                shared.console.print(f"\n[bold cyan]{aname}[/bold cyan] [dim]({agent.state.value})[/dim]  "
-                                                     f"phase={agent.phase}  model={model_short}  "
-                                                     f"cost=${agent.cost_usd:.4f}  tokens={agent.tokens_used:,}  cache={cache_pct}")
-
-                                # Plan table
-                                ptable = Table(border_style="dim", width=80, show_header=True)
-                                ptable.add_column("#", width=3, justify="right")
-                                ptable.add_column("Status", width=12)
-                                ptable.add_column("Step", width=58)
-                                if agent.plan:
-                                    _icons = {"pending": "[dim]\u25cb[/dim]", "in-progress": "[yellow]\u25b6[/yellow]", "done": "[green]\u2714[/green]", "skipped": "[dim]\u2013[/dim]"}
-                                    for i, step in enumerate(agent.plan, 1):
-                                        sicon = _icons.get(step["status"], " ")
-                                        scolor = "green" if step["status"] == "done" else "yellow" if step["status"] == "in-progress" else "dim"
-                                        ptable.add_row(str(i), f'{sicon} [{scolor}]{step["status"]}[/{scolor}]', step["step"])
-                                else:
-                                    ptable.add_row("", "", "[dim]No plan yet[/dim]")
-                                shared.console.print(ptable)
-
-                                # Recent tool calls
-                                if agent.tool_call_log:
-                                    shared.console.print("[dim]Recent tool calls:[/dim]")
-                                    for entry in agent.tool_call_log[-5:]:
-                                        result_short = entry['result'][:80]
-                                        shared.console.print(f"  [dim]R{entry['round']}[/dim] [bold]{entry['tool']}[/bold] {entry['args']}  [dim]{result_short}[/dim]")
-                        else:
-                            shared.console.print("[dim]No agents active.[/dim]")
-                    elif cmd == "pause":
-                        if not arg:
-                            shared.console.print("[swarm.warning]Usage: /pause <agent_name>[/swarm.warning]")
-                        else:
-                            agent = shared.state.get_agent(arg.strip())
-                            if agent is None:
-                                shared.console.print(f"[red]Agent '{arg.strip()}' not found.[/red]")
-                            elif agent.state == AgentState.PAUSED:
-                                shared.console.print(f"[yellow]Agent '{arg.strip()}' is already paused.[/yellow]")
-                            else:
-                                agent.pause_requested = True
-                                agent.transition(AgentState.PAUSED)
-                                shared.console.print(f"[yellow]Agent '{arg.strip()}' paused.[/yellow]")
-                    elif cmd == "resume":
-                        if not arg:
-                            shared.console.print("[swarm.warning]Usage: /resume <agent_name>[/swarm.warning]")
-                        else:
-                            agent = shared.state.get_agent(arg.strip())
-                            if agent is None:
-                                shared.console.print(f"[red]Agent '{arg.strip()}' not found.[/red]")
-                            elif agent.state != AgentState.PAUSED:
-                                shared.console.print(f"[yellow]Agent '{arg.strip()}' is not paused (state={agent.state.value}).[/yellow]")
-                            else:
-                                agent.pause_requested = False
-                                agent.transition(AgentState.IDLE)
-                                shared.console.print(f"[green]Agent '{arg.strip()}' resumed.[/green]")
-                    elif cmd == "approve":
-                        if not arg:
-                            shared.console.print("[swarm.warning]Usage: /approve <agent_name>[/swarm.warning]")
-                        else:
-                            agent = shared.state.get_agent(arg.strip())
-                            if agent is None:
-                                shared.console.print(f"[red]Agent '{arg.strip()}' not found.[/red]")
-                            elif agent.phase != "planning":
-                                shared.console.print(f"[yellow]Agent '{arg.strip()}' is not in planning phase (phase={agent.phase}).[/yellow]")
-                            else:
-                                PlanGate.transition_to_executing(agent)
-                                get_bus().post("user", "Plan approved", recipient=arg.strip(), kind="nudge")
-                                shared.console.print(f"[green]Agent '{arg.strip()}' plan approved -- now executing ({len(agent.plan)} steps).[/green]")
-                    elif cmd == "reject":
-                        if not arg:
-                            shared.console.print("[swarm.warning]Usage: /reject <agent_name> <feedback>[/swarm.warning]")
-                        else:
-                            reject_parts = arg.split(maxsplit=1)
-                            target_name = reject_parts[0]
-                            feedback = reject_parts[1] if len(reject_parts) > 1 else "Plan rejected. Revise your approach."
-                            agent = shared.state.get_agent(target_name)
-                            if agent is None:
-                                shared.console.print(f"[red]Agent '{target_name}' not found.[/red]")
-                            else:
-                                agent.phase = "planning"
-                                agent.approved_plan = None
-                                get_bus().post("user", f"Plan rejected: {feedback}", recipient=target_name, kind="nudge")
-                                shared.console.print(f"[yellow]Agent '{target_name}' plan rejected -- back to planning.[/yellow]")
-                    elif cmd == "tasks":
-                        dag = getattr(shared, '_current_dag', None)
-                        if dag and dag.subtasks:
-                            task_table = Table(title=f"[bold cyan]Task DAG[/bold cyan] -- {dag.goal[:60]}", border_style="dim", width=100)
-                            task_table.add_column("ID", width=6)
-                            task_table.add_column("Status", width=10)
-                            task_table.add_column("Expert", width=14)
-                            task_table.add_column("Description", ratio=1)
-                            task_table.add_column("Depends", width=12)
-                            _status_colors = {"pending": "dim", "running": "yellow", "done": "green", "failed": "red"}
-                            for st in dag.subtasks:
-                                color = _status_colors.get(st.status, "white")
-                                deps = ", ".join(st.depends_on) if st.depends_on else "-"
-                                task_table.add_row(st.id, f"[{color}]{st.status}[/{color}]", st.expert, st.description[:60], deps)
-                            shared.console.print(task_table)
-                        else:
-                            shared.console.print("[dim]No task DAG active. Use /swarm to start one.[/dim]")
-                    elif cmd == "budget":
-                        from grokswarm.guardrails import _cost_guard
-                        if arg and arg.strip():
-                            try:
-                                budget_val = float(arg.strip().lstrip("$"))
-                                _cost_guard.set_budget(budget_val)
-                                shared.state.session_cost_budget_usd = budget_val
-                                shared.console.print(f"[swarm.accent]Session budget set to ${budget_val:.2f}[/swarm.accent]")
-                            except ValueError:
-                                shared.console.print("[swarm.warning]Usage: /budget <amount> (e.g., /budget 5.00)[/swarm.warning]")
-                        else:
-                            current = _cost_guard.session_budget_usd
-                            rate = _cost_guard.get_rate_per_min()
-                            shared.console.print(f"  [bold]Session budget:[/bold]  {'$' + f'{current:.2f}' if current > 0 else 'unlimited'}")
-                            shared.console.print(f"  [bold]Session spent:[/bold]   ${shared.state.global_cost_usd:.4f}")
-                            shared.console.print(f"  [bold]Spending rate:[/bold]   ${rate:.4f}/min")
-                            if current > 0:
-                                remaining = max(0, current - shared.state.global_cost_usd)
-                                shared.console.print(f"  [bold]Remaining:[/bold]       ${remaining:.4f}")
-
-                    elif cmd == "model":
-                        model_parts = arg.split() if arg else []
-                        if not model_parts or model_parts[0] == "list":
-                            tiers = get_model_tiers()
-                            tbl = Table(title="Model Tiers", show_header=True, header_style="bold")
-                            tbl.add_column("Tier", style="bold cyan")
-                            tbl.add_column("Model")
-                            tbl.add_column("Input/1M", justify="right")
-                            tbl.add_column("Cached/1M", justify="right")
-                            tbl.add_column("Output/1M", justify="right")
-                            for tier, model_name in tiers.items():
-                                inp, cached, out = shared._get_pricing(model_name)
-                                tbl.add_row(tier, model_name, f"${inp:.2f}", f"${cached:.2f}", f"${out:.2f}")
-                            shared.console.print()
-                            shared.console.print(tbl)
-                            shared.console.print()
-                        elif model_parts[0] == "reset":
-                            reset_model_tiers()
-                            shared.console.print("[swarm.accent]Model tiers restored to defaults.[/swarm.accent]")
-                        elif len(model_parts) == 2:
-                            m_tier, m_name = model_parts
-                            try:
-                                set_model_tier(m_tier, m_name)
-                                shared.console.print(f"[swarm.accent]Tier '[bold]{m_tier}[/bold]' → {m_name}[/swarm.accent]")
-                            except ValueError as e:
-                                shared.console.print(f"[swarm.warning]{e}[/swarm.warning]")
-                        else:
-                            shared.console.print("[swarm.dim]Usage: /model [list|reset|<tier> <model-name>][/swarm.dim]")
-
-                    elif cmd == "bugs":
-                        from grokswarm.bugs import get_self_tracker, get_project_tracker, log_project_bug
-                        bug_parts = arg.split() if arg else []
-                        scope = "project"
-                        if bug_parts and bug_parts[0] in ("self", "project"):
-                            scope = bug_parts.pop(0)
-                        tracker = get_self_tracker() if scope == "self" else get_project_tracker()
-                        action = bug_parts[0] if bug_parts else "list"
-                        if action == "list" or not bug_parts:
-                            bugs = tracker.list()
-                            if not bugs:
-                                shared.console.print(f"[swarm.dim]No bugs in {scope} tracker.[/swarm.dim]")
-                            else:
-                                tbl = Table(title=f"{scope.title()} Bugs ({len(bugs)})", show_header=True, header_style="bold")
-                                tbl.add_column("#", style="bold", width=4)
-                                tbl.add_column("Sev", width=8)
-                                tbl.add_column("Status", width=11)
-                                tbl.add_column("Title")
-                                tbl.add_column("Source", width=6)
-                                for b in bugs:
-                                    sev_color = {"critical": "red", "high": "yellow", "medium": "cyan", "low": "dim"}.get(b.severity, "")
-                                    tbl.add_row(str(b.id), f"[{sev_color}]{b.severity}[/{sev_color}]", b.status, b.title, b.source)
-                                shared.console.print()
-                                shared.console.print(tbl)
-                                shared.console.print()
-                        elif action == "add":
-                            title = " ".join(bug_parts[1:]) if len(bug_parts) > 1 else ""
-                            if not title:
-                                shared.console.print("[swarm.dim]Usage: /bugs [self|project] add <title>[/swarm.dim]")
-                            else:
-                                bug = tracker.log(title, "", "medium", "user")
-                                shared.console.print(f"[swarm.accent]Bug #{bug.id} logged: {title}[/swarm.accent]")
-                        elif action == "fix" and len(bug_parts) >= 2:
-                            try:
-                                bid = int(bug_parts[1])
-                                updated = tracker.update(bid, status="fixed")
-                                if updated:
-                                    shared.console.print(f"[swarm.accent]Bug #{bid} marked as fixed.[/swarm.accent]")
-                                else:
-                                    shared.console.print(f"[swarm.warning]Bug #{bid} not found.[/swarm.warning]")
-                            except ValueError:
-                                shared.console.print("[swarm.dim]Usage: /bugs fix <id>[/swarm.dim]")
-                        elif action == "show" and len(bug_parts) >= 2:
-                            try:
-                                bid = int(bug_parts[1])
-                                bug = tracker.get(bid)
-                                if bug:
-                                    shared.console.print(f"\n[bold]Bug #{bug.id}[/bold] [{bug.severity}] [{bug.status}]")
-                                    shared.console.print(f"[bold]Title:[/bold] {bug.title}")
-                                    shared.console.print(f"[bold]Source:[/bold] {bug.source}")
-                                    shared.console.print(f"[bold]Created:[/bold] {bug.created}")
-                                    if bug.description:
-                                        shared.console.print(f"[bold]Description:[/bold]\n{bug.description[:500]}")
-                                    if bug.context:
-                                        shared.console.print(f"[bold]Context:[/bold] {json.dumps(bug.context, indent=2)[:300]}")
-                                    shared.console.print()
-                                else:
-                                    shared.console.print(f"[swarm.warning]Bug #{bid} not found.[/swarm.warning]")
-                            except ValueError:
-                                shared.console.print("[swarm.dim]Usage: /bugs show <id>[/swarm.dim]")
-                        else:
-                            shared.console.print("[swarm.dim]Usage: /bugs [self|project] [list|add <title>|show <id>|fix <id>][/swarm.dim]")
-
-                    elif cmd == "memory":
-                        mem_parts = arg.split() if arg else []
-                        action = mem_parts[0] if mem_parts else "list"
-                        if action == "list" or not mem_parts:
-                            entries = list_memory()
-                            if not entries:
-                                shared.console.print("[swarm.dim]No memory files.[/swarm.dim]")
-                            else:
-                                tbl = Table(title=f"Agent Memory ({len(entries)} files)")
-                                tbl.add_column("Key", ratio=1)
-                                tbl.add_column("Timestamp", width=20)
-                                tbl.add_column("Size", width=8, justify="right")
-                                for e in entries:
-                                    ts = e["timestamp"][:19].replace("T", " ") if e["timestamp"] != "?" else "?"
-                                    tbl.add_row(e["key"], ts, f"{e['size']:,}")
-                                shared.console.print()
-                                shared.console.print(tbl)
-                                shared.console.print()
-                        elif action == "prune":
-                            days = 30
-                            if len(mem_parts) > 1 and mem_parts[1].isdigit():
-                                days = int(mem_parts[1])
-                            deleted = prune_memory(days)
-                            shared.console.print(f"[swarm.accent]Pruned {deleted} memory file(s) older than {days} days.[/swarm.accent]")
-                        else:
-                            shared.console.print("[swarm.dim]Usage: /memory [list|prune [days]][/swarm.dim]")
-                    elif cmd == "eval":
-                        eval_script = shared.PROJECT_DIR / "eval_grokswarm.py"
-                        if not eval_script.exists():
-                            shared.console.print("[swarm.warning]eval_grokswarm.py not found in project directory.[/swarm.warning]")
-                        else:
-                            eval_args = [sys.executable, str(eval_script)]
-                            if arg:
-                                eval_args.extend(arg.split())
-                            else:
-                                eval_args.append("--live")
-                            shared.console.print(f"[swarm.dim]Running: {' '.join(eval_args)}[/swarm.dim]")
-                            proc = await asyncio.to_thread(
-                                subprocess.run, eval_args,
-                                capture_output=True, text=True, timeout=600,
-                                cwd=str(shared.PROJECT_DIR),
-                            )
-                            if proc.stdout:
-                                shared.console.print(proc.stdout[-3000:])
-                            if proc.returncode != 0 and proc.stderr:
-                                shared.console.print(f"[swarm.error]{proc.stderr[-1000:]}[/swarm.error]")
-                    elif cmd == "self-improve":
-                        if not arg:
-                            shared.console.print("[swarm.warning]Usage: /self-improve <description of improvement>[/swarm.warning]")
-                            continue
-                        shadow_dir = shared.PROJECT_DIR / ".grokswarm" / "shadow"
-                        shadow_dir.mkdir(parents=True, exist_ok=True)
-                        shadow_file = shadow_dir / "main.py"
-                        shutil.copy2(shared.PROJECT_DIR / "main.py", shadow_file)
-                        shared.state.self_improve_active = True
-                        shared.console.print(f"[swarm.accent]Shadow copy created:[/swarm.accent] [dim]{shadow_file.relative_to(shared.PROJECT_DIR)}[/dim]")
-                        shared.console.print("[swarm.dim]The swarm will edit and test the shadow copy safely...[/swarm.dim]\n")
-                        improve_prompt = f"""[SELF-IMPROVEMENT PROTOCOL]
-    A shadow copy of main.py has been created at `.grokswarm/shadow/main.py`.
-
-    TASK: {arg}
-
-    RULES:
-    1. ONLY modify `.grokswarm/shadow/main.py` using edit_file or write_file. If you need to create new files, create them in `.grokswarm/shadow/`.
-    2. DO NOT edit `main.py` directly (this is mechanically blocked).
-    3. After editing, verify it compiles: run_shell `python -m py_compile .grokswarm/shadow/main.py`
-    4. If test_grokswarm.py exists, run tests: run_shell `python -m pytest test_grokswarm.py -v`
-    5. When verified, stop and summarize your changes. I will handle promotion.
-
-    CRITICAL: If you extract code into a new file, you MUST remove that code from `.grokswarm/shadow/main.py` and update the imports in `.grokswarm/shadow/main.py` to use the new file.
-    CRITICAL: If you create a new file, you MUST use the `write_file` tool and provide the full path to the new file in the `.grokswarm/shadow/` directory."""
-                        conversation.append({"role": "user", "content": improve_prompt})
-                        conversation = await _trim_conversation(conversation)
-                        full_response = await _stream_with_tools(conversation)
-                        if session_name:
-                            save_session(session_name, conversation)
-                        shared.state.self_improve_active = False
-                        shared.console.print("\n[bold yellow]Self-Improvement Complete.[/bold yellow]")
-                        shared.console.print(f"[dim]Review changes: run_shell 'python -c \"import difflib,pathlib; a=pathlib.Path(\\\"main.py\\\").read_text().splitlines(); b=pathlib.Path(\\\".grokswarm/shadow/main.py\\\").read_text().splitlines(); print(chr(10).join(difflib.unified_diff(a,b,lineterm=\\\"\\\",n=3)))'[/dim]")
-                        if shared._terminal_confirm("Promote shadow copy to main.py?", default=False):
-                            check = subprocess.run(["python", "-m", "py_compile", str(shadow_file)], capture_output=True, text=True)
-                            if check.returncode != 0:
-                                shared.console.print("[bold red]Shadow copy has syntax errors \u2014 promotion blocked.[/bold red]")
-                                shared.console.print(f"[dim]{check.stderr[:300]}[/dim]")
-                            else:
-                                test_file = shared.PROJECT_DIR / "test_grokswarm.py"
-                                if test_file.exists():
-                                    shared.console.print("[swarm.dim]Running test suite against shadow copy (isolated)...[/swarm.dim]")
-                                    import tempfile as _tf
-                                    with _tf.TemporaryDirectory(prefix="grokswarm_test_") as iso_dir:
-                                        iso = Path(iso_dir)
-                                        shutil.copy2(shadow_file, iso / "main.py")
-                                        for f in shadow_dir.glob("*.py"):
-                                            if f.name != "main.py":
-                                                shutil.copy2(f, iso / f.name)
-                                        shutil.copy2(test_file, iso / "test_grokswarm.py")
-                                        for f in shared.PROJECT_DIR.glob("conftest*.py"):
-                                            shutil.copy2(f, iso / f.name)
-                                        test_check = subprocess.run(
-                                            [sys.executable, "-m", "pytest", "test_grokswarm.py", "-x", "-q"],
-                                            capture_output=True, text=True, cwd=str(iso), timeout=120
-                                        )
-                                    if test_check.returncode != 0:
-                                        shared.console.print("[bold red]Tests failed \u2014 promotion blocked.[/bold red]")
-                                        shared.console.print(f"[dim]{test_check.stdout[-500:] if test_check.stdout else test_check.stderr[:300]}[/dim]")
-                                        shared.console.print("[swarm.dim]Shadow copy preserved. Fix tests before promoting.[/swarm.dim]")
-                                    else:
-                                        shared.console.print("[swarm.accent]Tests passed (isolated)![/swarm.accent]")
-                                        shutil.copy2(shadow_file, shared.PROJECT_DIR / "main.py")
-                                        for f in shadow_dir.glob("*.py"):
-                                            if f.name != "main.py":
-                                                shutil.copy2(f, shared.PROJECT_DIR / f.name)
-                                        shared.console.print("[swarm.accent]main.py updated! Restart to load new features.[/swarm.accent]")
-                                else:
-                                    shutil.copy2(shadow_file, shared.PROJECT_DIR / "main.py")
-                                    for f in shadow_dir.glob("*.py"):
-                                        if f.name != "main.py":
-                                            shutil.copy2(f, shared.PROJECT_DIR / f.name)
-                                    shared.console.print("[swarm.accent]main.py updated! Restart to load new features.[/swarm.accent]")
-                        else:
-                            shared.console.print("[swarm.dim]Shadow copy preserved at .grokswarm/shadow/main.py[/swarm.dim]")
+                    entry = get_command(cmd)
+                    if entry:
+                        ctx = CmdContext(
+                            conversation=conversation,
+                            session_name=session_name,
+                            session=session,
+                            save_session=save_session,
+                        )
+                        result = entry.handler(arg, ctx)
+                        if asyncio.iscoroutine(result):
+                            await result
+                        if ctx.quit_flag:
+                            break
+                        if ctx.new_session_name is not None:
+                            session_name = ctx.new_session_name
                     else:
                         shared.console.print(f"[swarm.dim]Unknown command: /{cmd} -- type /help[/swarm.dim]")
                     continue
@@ -1508,19 +925,3 @@ async def _chat_async(session_name: str | None = None):
             processor_task.cancel()
 
 
-def experts_list_cmd():
-    """List experts (for /experts slash command)."""
-    table = Table(title="Expert Registry")
-    table.add_column("Expert")
-    for e in list_experts():
-        table.add_row(e)
-    shared.console.print(table)
-
-
-def skills_list_cmd():
-    """List skills (for /skills slash command)."""
-    table = Table(title="Skill Registry")
-    table.add_column("Skill")
-    for s in list_skills():
-        table.add_row(s)
-    shared.console.print(table)

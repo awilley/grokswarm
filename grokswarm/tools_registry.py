@@ -14,6 +14,7 @@ from grokswarm.tools_test import run_tests, run_app_capture, capture_tui_screens
 from grokswarm.tools_git import (
     git_status, git_diff, git_log, git_commit, git_checkout,
     git_branch, git_show_file, git_blame, git_stash, git_init,
+    git_merge, git_worktree_list, git_merge_abort,
 )
 from grokswarm.tools_browser import fetch_page, screenshot_page, extract_links
 from grokswarm.tools_search import web_search, x_search, code_execution
@@ -305,6 +306,24 @@ TOOL_SCHEMAS = [
         }
     },
     {"type": "function", "function": {"name": "git_init", "description": "Initialize a new git repository in the project directory. Only needed if no .git exists.", "parameters": {"type": "object", "properties": {}}}},
+    {
+        "type": "function",
+        "function": {
+            "name": "git_merge",
+            "description": "Merge a branch into the current branch. Reports merge conflicts if any.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "branch": {"type": "string", "description": "Branch name to merge into the current branch."},
+                    "no_ff": {"type": "boolean", "description": "If true, always create a merge commit (no fast-forward). Default: false."},
+                    "message": {"type": "string", "description": "Custom merge commit message."}
+                },
+                "required": ["branch"]
+            }
+        }
+    },
+    {"type": "function", "function": {"name": "git_worktree_list", "description": "List all active git worktrees.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "git_merge_abort", "description": "Abort an in-progress merge operation.", "parameters": {"type": "object", "properties": {}}}},
     {
         "type": "function",
         "function": {
@@ -665,6 +684,9 @@ TOOL_DISPATCH = {
     "git_blame": lambda args: git_blame(args["path"]),
     "git_stash": lambda args: git_stash(args.get("action", "list"), args.get("message")),
     "git_init": lambda args: git_init(),
+    "git_merge": lambda args: git_merge(args["branch"], no_ff=args.get("no_ff", False), message=args.get("message")),
+    "git_worktree_list": lambda args: git_worktree_list(),
+    "git_merge_abort": lambda args: git_merge_abort(),
     "fetch_page": lambda args: fetch_page(args["url"]),
     "screenshot_page": lambda args: screenshot_page(args["url"], args.get("save_path", "screenshot.png")),
     "extract_links": lambda args: extract_links(args["url"]),
@@ -686,7 +708,7 @@ TOOL_DISPATCH = {
 READ_ONLY_TOOLS = {
     "list_directory", "read_file", "search_files", "grep_files",
     "list_registry", "git_status", "git_diff", "git_log",
-    "git_branch", "git_show_file", "git_blame",
+    "git_branch", "git_show_file", "git_blame", "git_worktree_list",
     "fetch_page", "extract_links",
     "find_symbol", "find_references",
     "web_search", "x_search", "code_execution",
@@ -699,6 +721,7 @@ _FILE_MUTATION_TOOLS = {"edit_file", "write_file"}
 
 _READONLY_BLOCKED_TOOLS = {"write_file", "edit_file", "run_shell", "git_commit",
                            "git_checkout", "git_branch", "git_stash", "git_init",
+                           "git_merge", "git_merge_abort",
                            "create_expert", "create_skill", "screenshot_page"}
 
 

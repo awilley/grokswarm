@@ -588,19 +588,20 @@ def _incremental_context_refresh(file_path_str: str):
 
 
 def _safe_path(path: str) -> Path | None:
-    candidate = shared.PROJECT_DIR / path
+    project_dir = shared.get_project_dir()
+    candidate = project_dir / path
     try:
-        cur = shared.PROJECT_DIR
-        for part in candidate.relative_to(shared.PROJECT_DIR).parts:
+        cur = project_dir
+        for part in candidate.relative_to(project_dir).parts:
             cur = cur / part
             if cur.is_symlink():
                 real_target = cur.resolve()
-                if not real_target.is_relative_to(shared.PROJECT_DIR.resolve()):
+                if not real_target.is_relative_to(project_dir.resolve()):
                     return None
         full = candidate.resolve()
     except (ValueError, OSError):
         return None
-    if not full.is_relative_to(shared.PROJECT_DIR.resolve()):
+    if not full.is_relative_to(project_dir.resolve()):
         return None
     return full
 

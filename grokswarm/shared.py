@@ -5,6 +5,7 @@ import re
 import sys
 import asyncio
 import atexit
+import contextvars
 import typer
 from pathlib import Path
 from datetime import datetime
@@ -188,6 +189,25 @@ MEMORY_DIR.mkdir(exist_ok=True)
 SESSIONS_DIR.mkdir(exist_ok=True, parents=True)
 CONTEXT_CACHE_DIR.mkdir(exist_ok=True, parents=True)
 PLUGINS_DIR.mkdir(exist_ok=True, parents=True)
+
+
+# -- Workspace override (per-agent branch isolation via contextvars) --
+# When an agent runs in a git worktree, this overrides PROJECT_DIR for that task.
+# contextvars are automatically copied per asyncio.Task, so concurrent agents
+# each see their own workspace without interfering with each other.
+_workspace_override: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
+    '_workspace_override', default=None
+)
+
+
+def get_project_dir() -> Path:
+    """Return the effective project directory for the current execution context.
+
+    Returns the agent's worktree path if running in branch-isolated mode,
+    otherwise falls back to the global PROJECT_DIR.
+    """
+    ws = _workspace_override.get()
+    return ws if ws is not None else PROJECT_DIR
 
 
 # -- Background tasks --

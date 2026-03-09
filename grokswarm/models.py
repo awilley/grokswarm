@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 
 
 class AgentState(Enum):
@@ -37,6 +38,8 @@ class AgentInfo:
     tool_call_log: list[dict] = field(default_factory=list)  # [{tool, args_summary, result_preview, round}]
     current_model: str = ""  # model being used this round
     cached_tokens_total: int = 0  # total cached tokens for this agent
+    workspace: Path | None = None  # worktree path for branch-isolated agents
+    branch: str = ""  # git branch name for this agent's worktree
 
     def transition(self, new_state: AgentState):
         self.state = new_state

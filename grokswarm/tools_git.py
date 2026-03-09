@@ -1,6 +1,7 @@
 """Git tools + checkpoint constants."""
 
 import subprocess
+from pathlib import Path
 
 import grokswarm.shared as shared
 from grokswarm.context import _safe_path
@@ -9,12 +10,16 @@ from grokswarm.context import _safe_path
 AUTO_CHECKPOINT_THRESHOLD = 5
 MAX_EDIT_HISTORY = 20
 
+# -- Worktree directory --
+WORKTREE_DIR = ".grokswarm/worktrees"
 
-def _run_git(*args: str) -> str:
+
+def _run_git(*args: str, cwd: str | Path | None = None) -> str:
+    work_dir = str(cwd) if cwd else str(shared.PROJECT_DIR)
     try:
         result = subprocess.run(
             ["git"] + list(args),
-            capture_output=True, text=True, cwd=shared.PROJECT_DIR, timeout=15
+            capture_output=True, text=True, cwd=work_dir, timeout=30
         )
         output = result.stdout.strip()
         if result.returncode != 0:
@@ -145,3 +150,85 @@ def git_init() -> str:
     if shared._auto_approve("Initialize a new git repository here?"):
         return _run_git("init")
     return "Git init cancelled by user."
+
+
+# ---------------------------------------------------------------------------
+# Merge
+# ---------------------------------------------------------------------------
+
+def git_merge(branch: str, *, no_ff: bool = False, message: str | None = None) -> str:
+    """Merge a branch into the current branch."""
+    shared.console.print(f"[bold yellow]About to MERGE:[/bold yellow] {branch}")
+    if not shared._auto_approve(f"Approve merge of '{branch}' into current branch?"):
+        return "Merge cancelled by user."
+    args = ["merge"]
+    if no_ff:
+        args.append("--no-ff")
+    if message:
+        args.extend(["-m", message])
+    args.append(branch)
+    result = _run_git(*args)
+    if "CONFLICT" in result or "Automatic merge failed" in result:
+        # Get the list of conflicted files
+        conflicts = _run_git("diff", "--name-only", "--diff-filter=U")
+        return f"MERGE CONFLICT:\n{result}\n\nConflicted files:\n{conflicts}"
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Worktree management
+# ---------------------------------------------------------------------------
+
+def git_worktree_add(branch_name: str, base_ref: str = "HEAD") -> str:
+    """Create a git worktree for an agent to work in isolation.
+
+    Creates a new branch from base_ref and checks it out in a worktree
+    directory under .grokswarm/worktrees/<branch_name>/.
+
+    Returns the absolute path to the worktree directory.
+    """
+    worktree_base = shared.PROJECT_DIR / WORKTREE_DIR
+    worktree_base.mkdir(parents=True, exist_ok=True)
+    worktree_path = worktree_base / branch_name
+
+    if worktree_path.exists():
+        return f"Error: worktree path already exists: {worktree_path}"
+
+    # Create a new branch + worktree in one step
+    result = _run_git("worktree", "add", "-b", branch_name, str(worktree_path), base_ref)
+    if result.startswith("Error"):
+        return result
+
+    return str(worktree_path)
+
+
+def git_worktree_remove(branch_name: str, *, force: bool = False) -> str:
+    """Remove a worktree and optionally delete its branch."""
+    worktree_path = shared.PROJECT_DIR / WORKTREE_DIR / branch_name
+
+    if not worktree_path.exists():
+        return f"Error: worktree not found: {worktree_path}"
+
+    # Remove the worktree
+    args = ["worktree", "remove"]
+    if force:
+        args.append("--force")
+    args.append(str(worktree_path))
+    result = _run_git(*args)
+    if result.startswith("Error"):
+        return result
+
+    # Delete the branch (best-effort)
+    _run_git("branch", "-D", branch_name)
+
+    return f"Worktree removed: {worktree_path}"
+
+
+def git_worktree_list() -> str:
+    """List all active worktrees."""
+    return _run_git("worktree", "list")
+
+
+def git_merge_abort() -> str:
+    """Abort an in-progress merge."""
+    return _run_git("merge", "--abort")
