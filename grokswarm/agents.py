@@ -180,6 +180,8 @@ def _record_usage(model: str, prompt_tokens: int, completion_tokens: int, cached
         shared.state.project_completion_tokens += completion_tokens
         shared.state.project_cached_tokens += cached_tokens
         shared.state.project_cost_usd += cost
+        shared.state.global_tokens_used += prompt_tokens + completion_tokens
+        shared.state.global_cost_usd += cost
     try:
         _save_project_costs()
     except OSError:
@@ -541,16 +543,6 @@ Rules:
             if pt or ct:
                 _record_usage(round_model, pt, ct, cached)
                 agent.add_usage(pt, ct, round_model, cached)
-                _inp_r, _cached_r, _out_r = shared._get_pricing(round_model)
-                non_cached = max(0, pt - cached)
-                _global_cost = (
-                    (non_cached / 1_000_000.0) * _inp_r
-                    + (cached / 1_000_000.0) * _cached_r
-                    + (ct / 1_000_000.0) * _out_r
-                )
-                with _cost_lock:
-                    shared.state.global_tokens_used += pt + ct
-                    shared.state.global_cost_usd += _global_cost
                 agent.cached_tokens_total += cached
 
             # Guardrail: cost limits

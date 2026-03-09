@@ -751,6 +751,54 @@ async def handle_self_eval(arg: str, ctx: CmdContext) -> None:
     shared.console.print(result)
 
 
+async def handle_history(arg: str, ctx: CmdContext) -> None:
+    from rich.table import Table
+    history_file = Path("~/.grokswarm/history.txt").expanduser()
+    if not history_file.exists():
+        shared.console.print("[swarm.dim]No history file found.[/swarm.dim]")
+        return
+    # Parse prompt_toolkit history format: lines starting with '+' are content
+    entries: list[str] = []
+    current: list[str] = []
+    for line in history_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("+"):
+            current.append(line[1:])
+        else:
+            if current:
+                entries.append("\n".join(current))
+                current = []
+    if current:
+        entries.append("\n".join(current))
+    query = arg.strip().lower() if arg else ""
+    if query:
+        entries = [e for e in entries if query in e.lower()]
+    shown = entries[-25:]
+    if not shown:
+        shared.console.print(f"[swarm.dim]No history entries{'matching ' + repr(arg.strip()) if query else ''}.[/swarm.dim]")
+        return
+    tbl = Table(title=f"History ({len(shown)}/{len(entries)})", show_header=True, border_style="dim")
+    tbl.add_column("#", width=5, justify="right")
+    tbl.add_column("Input", ratio=1)
+    offset = len(entries) - len(shown)
+    for i, entry in enumerate(shown, offset + 1):
+        display = entry[:120] + ("..." if len(entry) > 120 else "")
+        tbl.add_row(str(i), display)
+    shared.console.print()
+    shared.console.print(tbl)
+    shared.console.print()
+
+
+async def handle_vim(arg: str, ctx: CmdContext) -> None:
+    from prompt_toolkit.enums import EditingMode
+    shared.state.vi_mode = not shared.state.vi_mode
+    if shared.state.vi_mode:
+        ctx.session.editing_mode = EditingMode.VI
+        shared.console.print("[swarm.accent]Vi mode [bold]ON[/bold] — ESC for normal mode, i for insert[/swarm.accent]")
+    else:
+        ctx.session.editing_mode = EditingMode.EMACS
+        shared.console.print("[swarm.accent]Vi mode [bold]OFF[/bold] — standard editing restored[/swarm.accent]")
+
+
 async def handle_daemon(arg: str, ctx: CmdContext) -> None:
     from grokswarm.daemon import start_daemon, stop_daemon, daemon_status, daemon_log, add_watch_pattern
     parts = arg.split() if arg else []

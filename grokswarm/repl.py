@@ -19,6 +19,7 @@ from prompt_toolkit.completion import Completer, Completion, PathCompleter
 from prompt_toolkit.document import Document
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 import grokswarm.shared as shared
 from grokswarm.models import AgentState
@@ -40,6 +41,7 @@ from grokswarm.cmd_handlers import (
     handle_peek, handle_pause, handle_resume, handle_approve, handle_reject,
     handle_tasks, handle_budget, handle_model, handle_bugs, handle_memory,
     handle_eval, handle_self_improve, handle_daemon, handle_self_eval,
+    handle_vim, handle_history,
 )
 
 # ---------------------------------------------------------------------------
@@ -92,6 +94,8 @@ _cmd("memory",       "View/prune agent memory files")(handle_memory)
 _cmd("eval",         "Run evaluation harness",              allow_while_busy=False)(handle_eval)
 _cmd("daemon",       "File watcher daemon (auto-test)")(handle_daemon)
 _cmd("self-eval",    "Eval -> fix -> re-eval loop",         allow_while_busy=False)(handle_self_eval)
+_cmd("vim",          "Toggle vi editing mode")(handle_vim)
+_cmd("history",      "Search command history",              aliases=["hist"])(handle_history)
 # fmt: on
 
 # -- Context-Aware Tab Completion --
@@ -676,6 +680,8 @@ async def _chat_async(session_name: str | None = None):
 
     @kb.add('escape', eager=True)
     def _handle_escape(event):
+        if shared.state.vi_mode:
+            return  # let prompt_toolkit's vi handler process escape
         buf = event.current_buffer
         if buf.complete_state:
             buf.cancel_completion()
@@ -707,6 +713,10 @@ async def _chat_async(session_name: str | None = None):
             shared.state.read_only = False
         event.app.invalidate()
 
+    @kb.add('c-x', 'c-e', eager=True)
+    def _handle_edit_in_editor(event):
+        event.current_buffer.open_in_editor(event.app)
+
     _multiline_supported = False
     try:
         @kb.add('s-enter', eager=True)
@@ -727,7 +737,8 @@ async def _chat_async(session_name: str | None = None):
 
     session = PromptSession(history=shared.SafeFileHistory(str(history_file)), completer=completer,
                             complete_while_typing=True, key_bindings=kb, multiline=_multiline_supported,
-                            erase_when_done=True)
+                            erase_when_done=True, auto_suggest=AutoSuggestFromHistory(),
+                            enable_history_search=True)
     session.app.ttimeoutlen = 0.01
     session.app.timeoutlen = 0.01
 
@@ -764,13 +775,20 @@ async def _chat_async(session_name: str | None = None):
 
     processing_busy = False
 
+    def _fmt_tokens(n: int) -> str:
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1_000:
+            return f"{n / 1_000:.1f}k"
+        return str(n)
+
     def get_bottom_toolbar():
         if shared.state.trust_mode:
-            mode_str = "<ansigreen>TRUST</ansigreen> <ansidarkgray>(auto-approve)</ansidarkgray>"
+            mode_str = "<ansigreen>TRUST</ansigreen>"
         elif shared.state.read_only:
-            mode_str = "<ansiyellow>READ-ONLY</ansiyellow> <ansidarkgray>(block writes)</ansidarkgray>"
+            mode_str = "<ansiyellow>READ-ONLY</ansiyellow>"
         else:
-            mode_str = "<ansidarkgray>NORMAL</ansidarkgray> <ansidarkgray>(require approval)</ansidarkgray>"
+            mode_str = "<ansidarkgray>NORMAL</ansidarkgray>"
         parts = []
         if shared._toolbar_status and not shared._is_prompt_suspended:
             icon = shared.THINKING_FRAMES[shared._toolbar_spinner_idx % len(shared.THINKING_FRAMES)]
@@ -792,8 +810,19 @@ async def _chat_async(session_name: str | None = None):
                 else:
                     agent_parts.append(f"{aname}: {ag.phase.title()}...")
             parts.append(f"  <ansidarkgray>{len(active_agents)} agent{'s' if len(active_agents) != 1 else ''} running | {' | '.join(agent_parts)}</ansidarkgray>")
+        # Status line: project | model | tokens | cost | [VI] | >> MODE
+        proj_name = shared.PROJECT_DIR.name
+        model_short = shared.MODEL.split("/")[-1].split("-")[-1][:12] if shared.MODEL else "?"
+        tok_str = _fmt_tokens(shared.state.global_tokens_used)
+        cost_str = f"${shared.state.global_cost_usd:.3f}"
+        vi_tag = " <ansicyan>[VI]</ansicyan>" if getattr(shared.state, 'vi_mode', False) else ""
         parts.append(
-            f"  <ansimagenta>\u25b6\u25b6</ansimagenta> <ansidarkgray>mode:</ansidarkgray> {mode_str}  <ansidarkgray>(shift+tab to cycle)</ansidarkgray>"
+            f"  <ansidarkgray>{proj_name}</ansidarkgray>"
+            f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{model_short}</ansidarkgray>"
+            f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{tok_str} tok</ansidarkgray>"
+            f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{cost_str}</ansidarkgray>"
+            f"{vi_tag}"
+            f" <ansidarkgray>|</ansidarkgray> <ansimagenta>\u25b6\u25b6</ansimagenta> {mode_str}"
         )
         return HTML("\n".join(parts))
 

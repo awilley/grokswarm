@@ -71,6 +71,7 @@ class SwarmState:
     read_only: bool = False
     self_improve_active: bool = False
     verbose_mode: bool = False
+    vi_mode: bool = False
     agent_mode: int = 0
     edit_history: list = field(default_factory=list)
     pending_write_count: int = 0
@@ -96,6 +97,7 @@ class SwarmState:
         self.global_tokens_used = 0
         self.global_cost_usd = 0.0
         self.request_auto_approve = False
+        self.vi_mode = False
 
     def register_agent(self, name: str, expert: str, task: str = "",
                        token_budget: int = 0, cost_budget_usd: float = 0.0,
@@ -114,6 +116,7 @@ class SwarmState:
         self.agents.clear()
         self.global_tokens_used = 0
         self.global_cost_usd = 0.0
+        self.vi_mode = False
         for task_name, task in _background_tasks.items():
             if not task.done():
                 task.cancel()
