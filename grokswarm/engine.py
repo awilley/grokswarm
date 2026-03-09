@@ -519,15 +519,26 @@ async def _stream_with_tools(conversation: list) -> str:
                 _chat = llm.create_chat(shared.MODEL, tools=xai_tools, max_tokens=shared.MAX_TOKENS)
                 llm.populate_chat(_chat, _cache_messages)
                 # xai-sdk streaming: tool calls arrive complete (no incremental accumulation)
-                async with asyncio.timeout(STREAM_TIMEOUT_SEC):
-                    async for response, chunk in _chat.stream():
-                        if shared._cancel_event.is_set():
-                            break
-                        stream_response = response
-                        if chunk.content:
-                            full_response += chunk.content
-                        for tc in chunk.tool_calls:
-                            collected_tool_calls.append(tc)
+                _cancel_stderr = None
+                try:
+                    async with asyncio.timeout(STREAM_TIMEOUT_SEC):
+                        async for response, chunk in _chat.stream():
+                            if shared._cancel_event.is_set():
+                                # Mute stderr during generator cleanup to suppress
+                                # OpenTelemetry context-detach noise from xai-sdk
+                                import sys as _sys, io as _io
+                                _cancel_stderr = _sys.stderr
+                                _sys.stderr = _io.StringIO()
+                                break
+                            stream_response = response
+                            if chunk.content:
+                                full_response += chunk.content
+                            for tc in chunk.tool_calls:
+                                collected_tool_calls.append(tc)
+                finally:
+                    if _cancel_stderr is not None:
+                        import sys as _sys
+                        _sys.stderr = _cancel_stderr
                 if shared._cancel_event.is_set():
                     shared.console.print("\n  [swarm.warning]\u23ce Interrupted.[/swarm.warning]")
                     shared._clear_status()
