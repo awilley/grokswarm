@@ -1548,7 +1548,7 @@ class TestSyntax:
 from grokswarm.guardrails import (
     PlanGate, GoalVerifier, LoopDetector, EvidenceTracker, ToolFilter,
     _extract_files_from_plan, notify, drain_notifications,
-    TaskComplexity, LessonsDB, CostGuard, DynamicTools,
+    TaskComplexity, LessonsDB, CostGuard, DynamicTools, GuardrailPipeline,
 )
 from grokswarm.models import AgentInfo, AgentState, SubTask, TaskDAG
 
@@ -2077,3 +2077,103 @@ class TestDynamicTools:
         extras = DynamicTools.infer_extra_tools("search the web for API documentation")
         assert "web_search" in extras
         assert "fetch_page" in extras
+
+
+# ---------------------------------------------------------------------------
+# GuardrailPipeline tests
+# ---------------------------------------------------------------------------
+
+class TestGuardrailPipeline:
+    def _make_pipeline(self, task="fix the bug in login", phase="planning"):
+        agent = AgentInfo(name="test-coder", expert="Coder")
+        agent.phase = phase
+        expert_data = {"name": "Coder", "mindset": "Clean code", "model_preference": "reasoning"}
+        gp = GuardrailPipeline(agent, "test-coder", task, expert_data, bus=None)
+        return gp, agent
+
+    def test_setup_simple_task_skips_planning(self):
+        gp, agent = self._make_pipeline(task="fix a typo in readme")
+        conversation = []
+        gp.setup(conversation)
+        assert agent.phase == "executing"
+
+    def test_setup_complex_task_keeps_planning(self):
+        gp, agent = self._make_pipeline(task="refactor the entire authentication system")
+        conversation = []
+        gp.setup(conversation)
+        assert agent.phase == "planning"
+
+    def test_select_model_planning(self):
+        gp, agent = self._make_pipeline()
+        agent.phase = "planning"
+        model = gp.select_model()
+        assert "grok-4.20" in model  # hardcore for planning
+
+    def test_select_model_executing(self):
+        gp, agent = self._make_pipeline()
+        agent.phase = "executing"
+        model = gp.select_model()
+        assert "reasoning" in model
+
+    def test_select_model_escalated(self):
+        gp, agent = self._make_pipeline()
+        gp.model_escalated = True
+        model = gp.select_model()
+        assert model == gp.escalation_model
+
+    def test_check_tool_blocks_during_planning(self):
+        gp, agent = self._make_pipeline()
+        agent.phase = "planning"
+        assert gp.check_tool("write_file", {}) is not None
+        assert gp.check_tool("read_file", {}) is None
+
+    def test_on_tool_result_tracks_mutations(self):
+        gp, agent = self._make_pipeline(phase="executing")
+        assert gp.made_file_mutations is False
+        gp.on_tool_result("edit_file", {"path": "foo.py"}, "ok", 1)
+        assert gp.made_file_mutations is True
+
+    def test_on_tool_result_tracks_tests(self):
+        gp, agent = self._make_pipeline(phase="executing")
+        assert gp.ran_tests is False
+        gp.on_tool_result("run_tests", {"command": "pytest"}, "[PASS]", 1)
+        assert gp.ran_tests is True
+
+    def test_verification_gate_triggers(self):
+        gp, agent = self._make_pipeline(phase="executing")
+        gp.made_file_mutations = True
+        gp.ran_tests = False
+        conversation = []
+        should_continue = gp.check_verification_gate(3, 10, conversation)
+        assert should_continue is True
+        assert len(conversation) == 1
+        assert "run tests" in conversation[0]["content"].lower()
+
+    def test_verification_gate_no_trigger_when_tests_run(self):
+        gp, agent = self._make_pipeline(phase="executing")
+        gp.made_file_mutations = True
+        gp.ran_tests = True
+        conversation = []
+        assert gp.check_verification_gate(3, 10, conversation) is False
+
+    def test_on_round_end_no_loop(self):
+        gp, agent = self._make_pipeline(phase="executing")
+        conversation = []
+        assert gp.on_round_end(0, conversation) is False
+
+    def test_cost_limits_no_issue(self):
+        gp, agent = self._make_pipeline(phase="executing")
+        assert gp.check_cost_limits(1) is False
+
+    def test_tool_call_logging(self):
+        gp, agent = self._make_pipeline(phase="executing")
+        gp._log_tool_call("read_file", {"path": "foo.py"}, "file contents here", 1)
+        assert len(agent.tool_call_log) == 1
+        assert agent.tool_call_log[0]["tool"] == "read_file"
+        assert agent.tool_call_log[0]["args"] == "foo.py"
+
+    def test_get_tool_schemas_returns_list(self):
+        gp, agent = self._make_pipeline()
+        schemas = gp.get_tool_schemas()
+        assert isinstance(schemas, list)
+        assert len(schemas) > 0
