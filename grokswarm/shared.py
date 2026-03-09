@@ -11,7 +11,6 @@ from rich.console import Console
 from rich.theme import Theme
 from rich.prompt import Confirm
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
 from prompt_toolkit.history import FileHistory
 
 from grokswarm.models import SwarmState
@@ -73,10 +72,8 @@ if not XAI_API_KEY:
     console.print("[swarm.error]Error: XAI_API_KEY not found in .env[/swarm.error]")
     raise typer.Exit(1)
 
-client = AsyncOpenAI(
-    api_key=XAI_API_KEY,
-    base_url="https://api.x.ai/v1"
-)
+from grokswarm import llm as _llm
+_llm.init_client(XAI_API_KEY)
 
 # -- Constants --
 VERSION = "0.30.0"

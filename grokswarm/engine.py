@@ -102,22 +102,22 @@ async def _compact_conversation(conversation: list) -> list:
     if len(old_text) > 4000:
         old_text = old_text[:4000] + "\n... (truncated)"
     try:
+        from grokswarm import llm
+        chat = llm.create_chat(shared.MODEL, max_tokens=500)
+        llm.populate_chat(chat, [
+            {"role": "system", "content": "Summarize this conversation history into a concise paragraph. Capture key decisions, files modified, tasks completed, and important context. Be factual and brief."},
+            {"role": "user", "content": old_text}
+        ])
         summary_response = await shared._api_call_with_retry(
-            lambda: shared.client.chat.completions.create(
-                model=shared.MODEL,
-                messages=[
-                    {"role": "system", "content": "Summarize this conversation history into a concise paragraph. Capture key decisions, files modified, tasks completed, and important context. Be factual and brief."},
-                    {"role": "user", "content": old_text}
-                ],
-                max_tokens=500,
-            ),
+            lambda: chat.sample(),
             label="Compaction"
         )
-        if hasattr(summary_response, 'usage') and summary_response.usage:
-            from grokswarm.agents import _record_usage, _extract_cached_tokens
-            _record_usage(shared.MODEL, summary_response.usage.prompt_tokens, summary_response.usage.completion_tokens,
-                          _extract_cached_tokens(summary_response.usage))
-        summary = summary_response.choices[0].message.content.strip()
+        usage = llm.extract_usage(summary_response)
+        if usage["prompt_tokens"] or usage["completion_tokens"]:
+            from grokswarm.agents import _record_usage
+            _record_usage(shared.MODEL, usage["prompt_tokens"], usage["completion_tokens"],
+                          usage["cached_tokens"])
+        summary = (summary_response.content or "").strip()
     except Exception:
         return system + others[-MAX_CONVERSATION_MESSAGES:]
     summary_msg = {"role": "user", "content": f"[CONVERSATION SUMMARY -- earlier messages compacted]\n{summary}"}
@@ -438,15 +438,17 @@ def _tool_detail(name: str, args: dict) -> str:
 
 
 async def _stream_with_tools(conversation: list) -> str:
-    from grokswarm.agents import _record_usage, _extract_cached_tokens
+    from grokswarm.agents import _record_usage
+    from grokswarm import llm
     full_response = ""
     total_prompt_tokens = 0
     total_completion_tokens = 0
+    xai_tools = llm.convert_tools(TOOL_SCHEMAS)
     for _round in range(MAX_TOOL_ROUNDS):
         full_response = ""
-        tool_calls_data = {}
+        collected_tool_calls = []
         finish_reason = None
-        round_usage = None
+        stream_response = None
 
         for _stream_attempt in range(1 + MAX_STREAM_RETRIES):
             try:
@@ -465,40 +467,15 @@ async def _stream_with_tools(conversation: list) -> str:
                             _cache_messages.append(_m)
                     else:
                         _cache_messages.append(_m)
-                stream = await shared._api_call_with_retry(
-                    lambda: shared.client.chat.completions.create(
-                        model=shared.MODEL,
-                        messages=_cache_messages,
-                        tools=TOOL_SCHEMAS,
-                        stream=True,
-                        stream_options={"include_usage": True},
-                        max_tokens=shared.MAX_TOKENS,
-                    ),
-                    label="Chat"
-                )
-                async for chunk in stream:
-                    if hasattr(chunk, 'usage') and chunk.usage:
-                        round_usage = chunk.usage
-                        continue
-                    if not chunk.choices:
-                        continue
-                    choice = chunk.choices[0]
-                    delta = choice.delta
-                    if choice.finish_reason:
-                        finish_reason = choice.finish_reason
-                    if delta.content:
-                        full_response += delta.content
-                    if delta.tool_calls:
-                        for tc in delta.tool_calls:
-                            idx = tc.index
-                            if idx not in tool_calls_data:
-                                tool_calls_data[idx] = {"id": "", "name": "", "arguments": ""}
-                            if tc.id:
-                                tool_calls_data[idx]["id"] = tc.id
-                            if tc.function and tc.function.name:
-                                tool_calls_data[idx]["name"] = tc.function.name
-                            if tc.function and tc.function.arguments:
-                                tool_calls_data[idx]["arguments"] += tc.function.arguments
+                _chat = llm.create_chat(shared.MODEL, tools=xai_tools, max_tokens=shared.MAX_TOKENS)
+                llm.populate_chat(_chat, _cache_messages)
+                # xai-sdk streaming: tool calls arrive complete (no incremental accumulation)
+                async for response, chunk in _chat.stream():
+                    stream_response = response
+                    if chunk.content:
+                        full_response += chunk.content
+                    for tc in chunk.tool_calls:
+                        collected_tool_calls.append(tc)
                 break
             except KeyboardInterrupt:
                 raise
@@ -507,25 +484,29 @@ async def _stream_with_tools(conversation: list) -> str:
                     shared.console.print(f"  [swarm.warning]\u26a0 Stream interrupted: {type(e).__name__}: {str(e)[:80]}[/swarm.warning]")
                     shared.console.print(f"  [swarm.dim]  retrying stream (attempt {_stream_attempt + 2}/{1 + MAX_STREAM_RETRIES})...[/swarm.dim]")
                     full_response = ""
-                    tool_calls_data = {}
+                    collected_tool_calls = []
                     finish_reason = None
-                    round_usage = None
+                    stream_response = None
                     await asyncio.sleep(2)
                 else:
                     raise
 
-        if round_usage:
-            pt = getattr(round_usage, 'prompt_tokens', 0) or 0
-            ct = getattr(round_usage, 'completion_tokens', 0) or 0
-            cached = _extract_cached_tokens(round_usage)
-            total_prompt_tokens += pt
-            total_completion_tokens += ct
-            _record_usage(shared.MODEL, pt, ct, cached)
+        # Usage is available on the final response object after streaming completes
+        if stream_response is not None:
+            _usage = llm.extract_usage(stream_response)
+            pt = _usage["prompt_tokens"]
+            ct = _usage["completion_tokens"]
+            cached = _usage["cached_tokens"]
+            if pt or ct:
+                total_prompt_tokens += pt
+                total_completion_tokens += ct
+                _record_usage(shared.MODEL, pt, ct, cached)
+            finish_reason = stream_response.finish_reason
 
         if finish_reason == "length":
             shared.console.print("  [swarm.warning]\u26a0 Response was truncated (token limit). Output may be incomplete.[/swarm.warning]")
 
-        if not tool_calls_data:
+        if not collected_tool_calls:
             shared._clear_status()
             if full_response:
                 try:
@@ -539,49 +520,45 @@ async def _stream_with_tools(conversation: list) -> str:
             return full_response
 
         if full_response:
-            has_spawn = any(tc["name"] == "spawn_agent" for tc in tool_calls_data.values())
+            has_spawn = any(tc.function.name == "spawn_agent" for tc in collected_tool_calls)
             if not has_spawn:
                 try:
                     shared.console.print(Markdown(full_response))
                 except Exception:
                     shared.console.print(full_response)
 
-        tool_calls_list = []
-        for idx in sorted(tool_calls_data.keys()):
-            tc = tool_calls_data[idx]
-            tool_calls_list.append({
-                "id": tc["id"],
-                "type": "function",
-                "function": {"name": tc["name"], "arguments": tc["arguments"]},
-            })
+        tool_calls_list = [llm.tool_call_to_dict(tc) for tc in collected_tool_calls]
         conversation.append({
             "role": "assistant",
             "content": full_response or None,
             "tool_calls": tool_calls_list,
         })
 
-        tool_count = len(tool_calls_data)
+        tool_count = len(collected_tool_calls)
         if shared.state.verbose_mode:
             shared.console.print(f"  [swarm.dim]round {_round + 1}/{MAX_TOOL_ROUNDS} \u2014 {tool_count} tool{'s' if tool_count != 1 else ''}[/swarm.dim]")
         shared._log(f"round {_round + 1}/{MAX_TOOL_ROUNDS} - {tool_count} tools")
 
         parsed_tools: list[tuple[dict, str, dict]] = []
-        for idx in sorted(tool_calls_data.keys()):
-            tc = tool_calls_data[idx]
-            name = tc["name"]
+        for tc_proto in collected_tool_calls:
+            tc_id = tc_proto.id
+            name = tc_proto.function.name
+            raw_args = tc_proto.function.arguments
+            # Flat dict matching the shape expected by tool execution code
+            tc = {"id": tc_id, "name": name, "arguments": raw_args}
             try:
-                args = json.loads(tc["arguments"])
+                args = json.loads(raw_args)
             except json.JSONDecodeError:
                 try:
-                    args = json.loads(_repair_json(tc["arguments"]))
+                    args = json.loads(_repair_json(raw_args))
                 except json.JSONDecodeError as e:
                     if shared.state.verbose_mode:
                         shared.console.print(f"  [swarm.accent]\u26a1 {name}[/swarm.accent][dim] (invalid arguments)[/dim]")
                     shared._log(f"\u26a1 {name} (invalid arguments)")
                     conversation.append({
                         "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": f"Error: Failed to parse tool arguments as JSON: {e}. Raw arguments: {tc['arguments'][:200]}. Please retry with valid JSON arguments.",
+                        "tool_call_id": tc_id,
+                        "content": f"Error: Failed to parse tool arguments as JSON: {e}. Raw arguments: {raw_args[:200]}. Please retry with valid JSON arguments.",
                     })
                     continue
             parsed_tools.append((tc, name, args))

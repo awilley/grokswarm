@@ -203,18 +203,18 @@ async def run_supervisor(task: str):
 Be direct. No hype. Output only the JSON.
 Respond ONLY with valid JSON: {{"experts": ["assistant", "researcher"], "team_name": null or "string", "reason": "brief explanation"}}"""
     try:
+        from grokswarm import llm
+        chat = llm.create_chat(shared.MODEL, response_format="json_object")
+        llm.populate_chat(chat, [{"role": "system", "content": system_prompt}, {"role": "user", "content": task}])
         response = await shared._api_call_with_retry(
-            lambda: shared.client.chat.completions.create(
-                model=shared.MODEL,
-                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": task}],
-                response_format={"type": "json_object"},
-            ),
+            lambda: chat.sample(),
             label="Supervisor"
         )
-        if hasattr(response, 'usage') and response.usage:
-            _record_usage(shared.MODEL, response.usage.prompt_tokens, response.usage.completion_tokens,
-                          _extract_cached_tokens(response.usage))
-        plan = json.loads(response.choices[0].message.content.strip())
+        usage = llm.extract_usage(response)
+        if usage["prompt_tokens"] or usage["completion_tokens"]:
+            _record_usage(shared.MODEL, usage["prompt_tokens"], usage["completion_tokens"],
+                          usage["cached_tokens"])
+        plan = json.loads((response.content or "").strip())
         shared.console.print(f"[bold cyan]Plan:[/bold cyan] {plan}")
         return plan
     except (json.JSONDecodeError, ValueError, KeyError):
@@ -489,20 +489,24 @@ Rules:
             round_model = gp.select_model()
 
             # -- API call --
-            _api_kwargs = dict(model=round_model, messages=conversation,
-                               tools=agent_tools, max_tokens=shared.MAX_TOKENS)
+            from grokswarm import llm
+            _xai_tools = llm.convert_tools(agent_tools)
+            _chat_kwargs: dict = dict(model=round_model, tools=_xai_tools, max_tokens=shared.MAX_TOKENS)
             if expert_temperature is not None:
-                _api_kwargs["temperature"] = float(expert_temperature)
+                _chat_kwargs["temperature"] = float(expert_temperature)
+            _chat = llm.create_chat(**_chat_kwargs)
+            llm.populate_chat(_chat, conversation)
             response = await shared._api_call_with_retry(
-                lambda: shared.client.chat.completions.create(**_api_kwargs),
+                lambda: _chat.sample(),
                 label=f"Expert:{data['name']}({round_model})"
             )
 
             # -- Record usage --
-            if hasattr(response, 'usage') and response.usage:
-                pt = response.usage.prompt_tokens or 0
-                ct = response.usage.completion_tokens or 0
-                cached = _extract_cached_tokens(response.usage)
+            _usage = llm.extract_usage(response)
+            pt = _usage["prompt_tokens"]
+            ct = _usage["completion_tokens"]
+            cached = _usage["cached_tokens"]
+            if pt or ct:
                 _record_usage(round_model, pt, ct, cached)
                 agent.add_usage(pt, ct, round_model, cached)
                 shared.state.global_tokens_used += pt + ct
@@ -519,12 +523,11 @@ Rules:
             if gp.check_cost_limits(rounds_used):
                 break
 
-            choice = response.choices[0]
-            msg = choice.message
+            tool_calls = llm.response_tool_calls(response)
 
             # -- No tool calls: agent is done (or needs verification gate) --
-            if not msg.tool_calls:
-                content = msg.content or ""
+            if not tool_calls:
+                content = response.content or ""
                 full_output += content
                 conversation.append({"role": "assistant", "content": content})
                 if gp.check_verification_gate(_round, max_rounds, conversation):
@@ -535,21 +538,17 @@ Rules:
             agent.transition(AgentState.WORKING)
             conversation.append({
                 "role": "assistant",
-                "content": msg.content or None,
-                "tool_calls": [
-                    {"id": tc.id, "type": "function",
-                     "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                    for tc in msg.tool_calls
-                ],
+                "content": response.content or None,
+                "tool_calls": [llm.tool_call_to_dict(tc) for tc in tool_calls],
             })
-            if msg.content:
-                full_output += msg.content + "\n"
+            if response.content:
+                full_output += response.content + "\n"
 
-            shared._log(f"agent {display_name}: round {_round + 1}/{max_rounds} - {len(msg.tool_calls)} tools")
+            shared._log(f"agent {display_name}: round {_round + 1}/{max_rounds} - {len(tool_calls)} tools")
 
             # Parse tool calls
             parsed_tools: list[tuple] = []
-            for tc in msg.tool_calls:
+            for tc in tool_calls:
                 tool_name = tc.function.name
                 try:
                     args = json.loads(tc.function.arguments)
@@ -620,33 +619,31 @@ Rules:
             conversation.append({"role": "user", "content": f"[SYSTEM] Completion verification found issues: {issue_text}. Address these now."})
             shared._log(f"agent {display_name}: verification issues, giving extra rounds: {issue_text}")
             execution_model = gp.execution_model
+            _v_xai_tools = llm.convert_tools(agent_tools)
             for _extra in range(min(2, max_rounds - rounds_used)):
                 rounds_used += 1
+                _v_chat = llm.create_chat(execution_model, tools=_v_xai_tools, max_tokens=shared.MAX_TOKENS)
+                llm.populate_chat(_v_chat, conversation)
                 response = await shared._api_call_with_retry(
-                    lambda: shared.client.chat.completions.create(
-                        model=execution_model, messages=conversation,
-                        tools=agent_tools, max_tokens=shared.MAX_TOKENS),
+                    lambda: _v_chat.sample(),
                     label=f"Expert:{data['name']}:verification"
                 )
-                if hasattr(response, 'usage') and response.usage:
-                    pt = response.usage.prompt_tokens or 0
-                    ct = response.usage.completion_tokens or 0
-                    cached = _extract_cached_tokens(response.usage)
-                    _record_usage(execution_model, pt, ct, cached)
-                    agent.add_usage(pt, ct, execution_model, cached)
-                choice = response.choices[0]
-                msg = choice.message
-                if msg.content:
-                    full_output += msg.content + "\n"
-                    conversation.append({"role": "assistant", "content": msg.content})
-                if msg.tool_calls:
+                _v_usage = llm.extract_usage(response)
+                if _v_usage["prompt_tokens"] or _v_usage["completion_tokens"]:
+                    _record_usage(execution_model, _v_usage["prompt_tokens"], _v_usage["completion_tokens"],
+                                  _v_usage["cached_tokens"])
+                    agent.add_usage(_v_usage["prompt_tokens"], _v_usage["completion_tokens"],
+                                    execution_model, _v_usage["cached_tokens"])
+                v_tool_calls = llm.response_tool_calls(response)
+                if response.content:
+                    full_output += response.content + "\n"
+                    conversation.append({"role": "assistant", "content": response.content})
+                if v_tool_calls:
                     conversation.append({
-                        "role": "assistant", "content": msg.content or None,
-                        "tool_calls": [{"id": tc.id, "type": "function",
-                                        "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                                       for tc in msg.tool_calls],
+                        "role": "assistant", "content": response.content or None,
+                        "tool_calls": [llm.tool_call_to_dict(tc) for tc in v_tool_calls],
                     })
-                    for tc in msg.tool_calls:
+                    for tc in v_tool_calls:
                         try:
                             tc_args = json.loads(tc.function.arguments)
                         except json.JSONDecodeError:

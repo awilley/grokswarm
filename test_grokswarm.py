@@ -46,6 +46,7 @@ _main = _import_main()
 import grokswarm.shared as _shared
 import grokswarm.agents as _agents
 import grokswarm.tools_shell as _tools_shell
+import grokswarm.llm as _llm
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1306,8 +1307,6 @@ class TestRunExpert:
         _shared.EXPERTS_DIR = experts_dir
 
         # Round 1: update_plan (allowed in planning phase, triggers transition to executing)
-        plan_msg = MagicMock()
-        plan_msg.content = "Let me plan first."
         tc_plan = MagicMock()
         tc_plan.id = "call_plan"
         tc_plan.function.name = "update_plan"
@@ -1315,39 +1314,36 @@ class TestRunExpert:
             {"step": "Create file", "status": "pending"},
             {"step": "Verify it", "status": "pending"},
         ]})
-        plan_msg.tool_calls = [tc_plan]
+
+        resp1 = MagicMock()
+        resp1.content = "Let me plan first."
+        resp1.tool_calls = [tc_plan]
+        resp1.usage = MagicMock(prompt_tokens=100, completion_tokens=50,
+                                total_tokens=150, cached_prompt_text_tokens=0, reasoning_tokens=0)
 
         # Round 2: write_file (now allowed since we transitioned to executing)
-        tool_call_msg = MagicMock()
-        tool_call_msg.content = "Let me create that file."
         tc = MagicMock()
         tc.id = "call_123"
         tc.function.name = "write_file"
         tc.function.arguments = json.dumps({"path": str(tmp_path / "out.txt"), "content": "hello"})
-        tool_call_msg.tool_calls = [tc]
-
-        # Round 3: final text
-        final_msg = MagicMock()
-        final_msg.content = "Done! File created."
-        final_msg.tool_calls = None
-
-        resp1 = MagicMock()
-        resp1.choices = [MagicMock(message=plan_msg)]
-        resp1.usage = MagicMock(prompt_tokens=100, completion_tokens=50)
 
         resp2 = MagicMock()
-        resp2.choices = [MagicMock(message=tool_call_msg)]
-        resp2.usage = MagicMock(prompt_tokens=100, completion_tokens=50)
+        resp2.content = "Let me create that file."
+        resp2.tool_calls = [tc]
+        resp2.usage = MagicMock(prompt_tokens=100, completion_tokens=50,
+                                total_tokens=150, cached_prompt_text_tokens=0, reasoning_tokens=0)
 
+        # Round 3: final text
         resp3 = MagicMock()
-        resp3.choices = [MagicMock(message=final_msg)]
-        resp3.usage = MagicMock(prompt_tokens=200, completion_tokens=100)
+        resp3.content = "Done! File created."
+        resp3.tool_calls = []
+        resp3.usage = MagicMock(prompt_tokens=200, completion_tokens=100,
+                                total_tokens=300, cached_prompt_text_tokens=0, reasoning_tokens=0)
 
         call_count = 0
-        async def mock_create(**kwargs):
+        async def mock_sample():
             nonlocal call_count
             call_count += 1
-            assert "tools" in kwargs, "TOOL_SCHEMAS must be passed to API"
             if call_count == 1:
                 return resp1
             elif call_count == 2:
@@ -1355,8 +1351,14 @@ class TestRunExpert:
             else:
                 return resp3
 
-        mock_client = MagicMock()
-        mock_client.chat.completions.create = mock_create
+        mock_chat = MagicMock()
+        mock_chat.sample = mock_sample
+        mock_chat.append = MagicMock()
+
+        original_create_chat = _llm.create_chat
+        def mock_create_chat(*args, **kwargs):
+            assert "tools" in kwargs, "tools must be passed to create_chat"
+            return mock_chat
 
         executed_tools = []
         original_execute = _main._execute_tool
@@ -1365,7 +1367,8 @@ class TestRunExpert:
             return await original_execute(name, args)
 
         _main.state.agents.clear()
-        with patch.object(_shared, "client", mock_client), \
+        with patch.object(_llm, "create_chat", mock_create_chat), \
+             patch.object(_llm, "populate_chat", MagicMock()), \
              patch.object(_agents, "_execute_tool", tracking_execute):
             result = asyncio.run(_main.run_expert("coder", "Create a file", agent_name="test-coder"))
 
@@ -1381,25 +1384,25 @@ class TestRunExpert:
         old_dir = _shared.EXPERTS_DIR
         _shared.EXPERTS_DIR = experts_dir
 
-        final_msg = MagicMock()
-        final_msg.content = "Here's your answer."
-        final_msg.tool_calls = None
-
         resp = MagicMock()
-        resp.choices = [MagicMock(message=final_msg)]
-        resp.usage = MagicMock(prompt_tokens=50, completion_tokens=30)
+        resp.content = "Here's your answer."
+        resp.tool_calls = []
+        resp.usage = MagicMock(prompt_tokens=50, completion_tokens=30,
+                               total_tokens=80, cached_prompt_text_tokens=0, reasoning_tokens=0)
 
         call_count = 0
-        async def mock_create(**kwargs):
+        async def mock_sample():
             nonlocal call_count
             call_count += 1
             return resp
 
-        mock_client = MagicMock()
-        mock_client.chat.completions.create = mock_create
+        mock_chat = MagicMock()
+        mock_chat.sample = mock_sample
+        mock_chat.append = MagicMock()
 
         _main.state.agents.clear()
-        with patch.object(_shared, "client", mock_client):
+        with patch.object(_llm, "create_chat", lambda *a, **kw: mock_chat), \
+             patch.object(_llm, "populate_chat", MagicMock()):
             result = asyncio.run(_main.run_expert("coder", "Explain stuff", agent_name="test-coder2"))
 
         assert result == "Here's your answer."

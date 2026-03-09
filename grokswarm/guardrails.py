@@ -331,22 +331,23 @@ RULES:
             {"role": "user", "content": prompt},
         ]
 
+        from grokswarm import llm
+
         for decompose_model in Orchestrator._DECOMPOSE_MODELS:
             try:
+                chat = llm.create_chat(decompose_model, response_format="json_object")
+                llm.populate_chat(chat, messages)
                 response = await shared._api_call_with_retry(
-                    lambda m=decompose_model: shared.client.chat.completions.create(
-                        model=m,
-                        messages=messages,
-                        response_format={"type": "json_object"},
-                    ),
+                    lambda: chat.sample(),
                     label=f"Orchestrator:decompose({decompose_model})"
                 )
-                if hasattr(response, 'usage') and response.usage:
-                    from grokswarm.agents import _record_usage, _extract_cached_tokens
-                    _record_usage(decompose_model, response.usage.prompt_tokens, response.usage.completion_tokens,
-                                  _extract_cached_tokens(response.usage))
+                usage = llm.extract_usage(response)
+                if usage["prompt_tokens"] or usage["completion_tokens"]:
+                    from grokswarm.agents import _record_usage
+                    _record_usage(decompose_model, usage["prompt_tokens"], usage["completion_tokens"],
+                                  usage["cached_tokens"])
 
-                data = json.loads(response.choices[0].message.content.strip())
+                data = json.loads((response.content or "").strip())
                 subtasks = []
                 for item in data.get("subtasks", []):
                     subtasks.append(SubTask(

@@ -30,25 +30,24 @@ def _is_dangerous_command(command: str) -> bool:
 
 
 async def _explain_command_safety(command: str) -> str:
+    from grokswarm import llm
     try:
-        response = await shared._api_call_with_retry(
-            lambda: shared.client.chat.completions.create(
-                model=shared.MODEL,
-                messages=[
-                    {"role": "system", "content": """You are a command safety analyst. Given a shell command, explain:
+        chat = llm.create_chat(shared.MODEL, max_tokens=300)
+        llm.populate_chat(chat, [
+            {"role": "system", "content": """You are a command safety analyst. Given a shell command, explain:
 1. What the command does (plain English)
 2. What files/resources it accesses or modifies
 3. Safety assessment: SAFE, CAUTION, or DANGEROUS
 4. Any risks or side effects
 
 Be concise — 3-5 lines max. Working directory is: """ + str(shared.PROJECT_DIR)},
-                    {"role": "user", "content": f"Analyze this command:\n```\n{command}\n```"}
-                ],
-                max_tokens=300,
-            ),
+            {"role": "user", "content": f"Analyze this command:\n```\n{command}\n```"}
+        ])
+        response = await shared._api_call_with_retry(
+            lambda: chat.sample(),
             label="SafetyCheck"
         )
-        return response.choices[0].message.content or "(no analysis available)"
+        return response.content or "(no analysis available)"
     except Exception as e:
         return f"(safety analysis failed: {e})"
 

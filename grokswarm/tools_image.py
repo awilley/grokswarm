@@ -23,19 +23,18 @@ async def analyze_image(path: str, question: str = "Describe this image in detai
     if len(data) > 20 * 1024 * 1024:
         return "Error: image too large (max 20 MB)."
     b64 = base64.b64encode(data).decode("ascii")
+    from grokswarm import llm
     try:
+        chat = llm.create_chat(shared.MODEL, max_tokens=1024)
+        llm.populate_chat(chat, [{"role": "user", "content": [
+            {"type": "text", "text": question},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}", "detail": detail}},
+        ]}])
         resp = await shared._api_call_with_retry(
-            lambda: shared.client.chat.completions.create(
-                model=shared.MODEL,
-                messages=[{"role": "user", "content": [
-                    {"type": "text", "text": question},
-                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}", "detail": detail}},
-                ]}],
-                max_tokens=1024,
-            ),
+            lambda: chat.sample(),
             label="Vision"
         )
-        return resp.choices[0].message.content.strip()
+        return (resp.content or "").strip()
     except Exception as e:
         return f"Vision error: {e}"
 

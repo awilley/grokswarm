@@ -20,8 +20,6 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.patch_stdout import patch_stdout
-from openai import AsyncOpenAI
-
 import grokswarm.shared as shared
 from grokswarm.models import AgentState
 from grokswarm.context import (
@@ -566,7 +564,8 @@ def main(
                 shared.MAX_TOKENS = int(cfg["max_tokens"])
             if not base_url and cfg.get("base_url"):
                 shared.BASE_URL = cfg["base_url"]
-                shared.client = AsyncOpenAI(api_key=os.getenv(cfg.get("api_key_env", "XAI_API_KEY")) or shared.XAI_API_KEY, base_url=shared.BASE_URL)
+                from grokswarm import llm
+                llm.reset_client(api_key=os.getenv(cfg.get("api_key_env", "XAI_API_KEY")) or shared.XAI_API_KEY)
             if cfg.get("code_model"):
                 shared.CODE_MODEL = cfg["code_model"]
             extra_ignore = cfg.get("ignore_dirs", [])
@@ -584,7 +583,8 @@ def main(
     if base_url:
         shared.BASE_URL = base_url
     if api_key or base_url:
-        shared.client = AsyncOpenAI(api_key=api_key or shared.XAI_API_KEY, base_url=shared.BASE_URL)
+        from grokswarm import llm
+        llm.reset_client(api_key=api_key or shared.XAI_API_KEY)
 
     if ctx.invoked_subcommand is None:
         show_welcome(session)

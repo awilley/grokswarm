@@ -7,7 +7,7 @@ from grokswarm.models import AgentState, AgentInfo, SwarmState
 
 # -- shared --
 from grokswarm.shared import (
-    console, app, state, client,
+    console, app, state,
     SWARM_THEME, THINKING_FRAMES,
     XAI_API_KEY, VERSION, MODEL, BASE_URL, MAX_TOKENS, CODE_MODEL,
     MODEL_PRICING, _get_pricing,
