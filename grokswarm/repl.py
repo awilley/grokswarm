@@ -39,7 +39,7 @@ from grokswarm.cmd_handlers import (
     handle_watch, handle_tell, handle_abort, handle_clear_swarm, handle_agents,
     handle_peek, handle_pause, handle_resume, handle_approve, handle_reject,
     handle_tasks, handle_budget, handle_model, handle_bugs, handle_memory,
-    handle_eval, handle_self_improve,
+    handle_eval, handle_self_improve, handle_daemon,
 )
 
 # ---------------------------------------------------------------------------
@@ -90,6 +90,7 @@ _cmd("bugs",         "View/manage bugs")(handle_bugs)
 _cmd("self-improve", "Improve own source (shadow + test)",  allow_while_busy=False)(handle_self_improve)
 _cmd("memory",       "View/prune agent memory files")(handle_memory)
 _cmd("eval",         "Run evaluation harness",              allow_while_busy=False)(handle_eval)
+_cmd("daemon",       "File watcher daemon (auto-test)")(handle_daemon)
 # fmt: on
 
 # -- Context-Aware Tab Completion --
@@ -114,6 +115,7 @@ class SwarmCompleter(Completer):
     MODEL_SUBCMDS = ["list", "reset", "fast", "reasoning", "hardcore", "multi_agent"]
     BUGS_SUBCMDS = ["list", "add", "show", "fix", "self", "project"]
     MEMORY_SUBCMDS = ["list", "prune"]
+    DAEMON_SUBCMDS = ["start", "stop", "status", "log", "add"]
 
     # Class-level attribute — populated after class definition
     SLASH_COMMANDS: dict[str, str] = {}
@@ -166,6 +168,11 @@ class SwarmCompleter(Completer):
         elif cmd == "memory":
             if not arg_text.endswith(" "):
                 for sc in self.MEMORY_SUBCMDS:
+                    if sc.startswith(arg_text.lower()):
+                        yield Completion(sc, start_position=-len(arg_text))
+        elif cmd == "daemon":
+            if not arg_text.endswith(" "):
+                for sc in self.DAEMON_SUBCMDS:
                     if sc.startswith(arg_text.lower()):
                         yield Completion(sc, start_position=-len(arg_text))
         elif cmd == "project":
