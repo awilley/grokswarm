@@ -908,6 +908,22 @@ async def handle_self_scores(arg: str, ctx: CmdContext) -> None:
                     shared.console.print(f"    {status} {c.get('check', '?')} "
                                          f"({c.get('category', '?')} w={c.get('weight', 0):.1f}): "
                                          f"{str(c.get('message', ''))[:60]}")
+        # Improvement notes
+        notes = d.get("notes", {})
+        if notes.get("strengths") or notes.get("weaknesses") or notes.get("suggestions"):
+            shared.console.print()
+            if notes.get("strengths"):
+                shared.console.print("  [bold green]Strengths:[/bold green]")
+                for s in notes["strengths"]:
+                    shared.console.print(f"    - {s}")
+            if notes.get("weaknesses"):
+                shared.console.print("  [bold red]Weaknesses:[/bold red]")
+                for w in notes["weaknesses"]:
+                    shared.console.print(f"    - {w}")
+            if notes.get("suggestions"):
+                shared.console.print("  [bold yellow]Suggestions:[/bold yellow]")
+                for s in notes["suggestions"]:
+                    shared.console.print(f"    - {s}")
         shared.console.print()
         return
 
@@ -926,21 +942,24 @@ async def handle_self_scores(arg: str, ctx: CmdContext) -> None:
     tbl.add_column("Cat", width=4)
     tbl.add_column("Description", ratio=1)
     tbl.add_column("S.Qual", width=7, justify="right")
-    tbl.add_column("S.Cost$", width=7, justify="right")
-    tbl.add_column("S.Time$", width=7, justify="right")
+    tbl.add_column("S.Cost", width=8, justify="right")
+    tbl.add_column("S.Time", width=8, justify="right")
     tbl.add_column("S.Over", width=7, justify="right")
     tbl.add_column("|", width=1)
     tbl.add_column("W.Qual", width=7, justify="right")
-    tbl.add_column("W.Cost$", width=7, justify="right")
-    tbl.add_column("W.Time$", width=7, justify="right")
+    tbl.add_column("W.Cost", width=8, justify="right")
+    tbl.add_column("W.Time", width=8, justify="right")
     tbl.add_column("W.Over", width=7, justify="right")
     tbl.add_column("Verdict", width=12)
+    tbl.add_column("Notes", width=8)
 
     for tid in sorted(all_tasks.keys()):
         info = all_tasks[tid]
         d = scores.get(tid)
         if d:
-            def _f(v): return f"{v:.0%}" if isinstance(v, (int, float)) else "--"
+            def _pct(v): return f"{v:.0%}" if isinstance(v, (int, float)) else "--"
+            def _cost(v): return f"${v:.3f}" if isinstance(v, (int, float)) else "--"
+            def _time(v): return f"{v:.1f}s" if isinstance(v, (int, float)) else "--"
             has_swarm = d.get("swarm_quality", 0) > 0 or d.get("swarm_cost_score", 0) > 0
             # Derive verdict from overall scores
             s_over = d.get("single_overall", 0) or 0
@@ -953,22 +972,27 @@ async def handle_self_scores(arg: str, ctx: CmdContext) -> None:
                 verdict = "Swarm Better"
             else:
                 verdict = "Tie"
+            # Notes summary: count weaknesses and suggestions
+            notes = d.get("notes", {})
+            n_w = len(notes.get("weaknesses", []))
+            n_s = len(notes.get("suggestions", []))
+            notes_str = f"{n_w}W {n_s}S" if (n_w or n_s) else ""
             tbl.add_row(
                 tid, info["category"], info["description"][:30],
-                _f(d.get("single_quality")), _f(d.get("single_cost_score")),
-                _f(d.get("single_time_score")), _f(d.get("single_overall")),
+                _pct(d.get("single_quality")), _cost(d.get("single_cost_usd")),
+                _time(d.get("single_time_s")), _pct(d.get("single_overall")),
                 "|",
-                _f(d.get("swarm_quality")) if has_swarm else "--",
-                _f(d.get("swarm_cost_score")) if has_swarm else "--",
-                _f(d.get("swarm_time_score")) if has_swarm else "--",
-                _f(d.get("swarm_overall")) if has_swarm else "--",
-                verdict,
+                _pct(d.get("swarm_quality")) if has_swarm else "--",
+                _cost(d.get("swarm_cost_usd")) if has_swarm else "--",
+                _time(d.get("swarm_time_s")) if has_swarm else "--",
+                _pct(d.get("swarm_overall")) if has_swarm else "--",
+                verdict, notes_str,
             )
         else:
             tbl.add_row(
                 tid, info["category"], info["description"][:30],
                 "--", "--", "--", "--", "|",
-                "--", "--", "--", "--", "(not run)",
+                "--", "--", "--", "--", "(not run)", "",
             )
 
     shared.console.print()
