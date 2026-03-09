@@ -258,24 +258,47 @@ def _session_path(name: str) -> Path:
     return shared.SESSIONS_DIR / f"{safe_name}.json"
 
 
+def _build_session_summary(messages: list) -> str:
+    """Build a concise text summary of conversation messages for session restore."""
+    parts = []
+    for m in messages:
+        role = m.get("role", "")
+        content = m.get("content") or ""
+        if role == "user":
+            parts.append(f"User: {content[:200]}")
+        elif role == "assistant" and content:
+            parts.append(f"Grok: {content[:200]}")
+        elif role == "assistant" and m.get("tool_calls"):
+            tools = [tc["function"]["name"] for tc in m["tool_calls"]]
+            parts.append(f"Grok used tools: {', '.join(tools)}")
+    return "\n".join(parts[-30:])  # last 30 exchanges max
+
+
 def save_session(name: str, conversation: list):
+    msgs = [m for m in conversation if m["role"] != "system"]
     data = {
         "name": name,
         "project": str(shared.PROJECT_DIR),
         "updated": datetime.now().isoformat(),
-        "message_count": len([m for m in conversation if m["role"] != "system"]),
-        "messages": [m for m in conversation if m["role"] != "system"],
+        "message_count": len(msgs),
+        "summary": _build_session_summary(msgs),
+        "messages": msgs,
     }
     _session_path(name).write_text(shared._redact_secrets(json.dumps(data, indent=2)))
 
 
-def load_session(name: str) -> list | None:
+def load_session(name: str) -> tuple[list, str] | None:
+    """Load a session. Returns (messages, summary) or None."""
     path = _session_path(name)
     if not path.exists():
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data.get("messages", [])
+        msgs = data.get("messages", [])
+        summary = data.get("summary", "")
+        if not summary and msgs:
+            summary = _build_session_summary(msgs)
+        return msgs, summary
     except (json.JSONDecodeError, KeyError):
         return None
 
@@ -390,11 +413,16 @@ def _handle_session_command(arg: str, conversation: list, current_session: str |
         if not subarg:
             shared.console.print("[swarm.warning]Usage: /session load <name>[/swarm.warning]")
             return None
-        msgs = load_session(subarg)
-        if msgs:
+        result = load_session(subarg)
+        if result:
+            msgs, summary = result
             conversation.clear()
             conversation.append({"role": "system", "content": shared.SYSTEM_PROMPT})
             conversation.extend(msgs)
+            # Inject resume context so the model knows this is a restored session
+            if summary:
+                conversation.append({"role": "user", "content": f"[SESSION RESTORED] This is a continuation of a previous conversation named '{subarg}'. Here is a summary of what we discussed:\n{summary}\n\nPlease continue from where we left off."})
+                conversation.append({"role": "assistant", "content": f"I remember our previous conversation. I have the full history loaded ({len(msgs)} messages). Let's continue where we left off."})
             shared.console.print(f"[swarm.accent]Loaded session '[bold]{subarg}[/bold]' ({len(msgs)} messages). Auto-saving enabled.[/swarm.accent]")
             return subarg
         else:
@@ -676,11 +704,15 @@ async def _chat_async(session_name: str | None = None):
     conversation = [{"role": "system", "content": shared.SYSTEM_PROMPT}]
 
     if session_name:
-        saved_msgs = load_session(session_name)
-        if saved_msgs:
+        result = load_session(session_name)
+        if result:
+            saved_msgs, summary = result
             conversation.extend(saved_msgs)
-            msg_count = len(saved_msgs)
-            shared.console.print(f"[swarm.accent]Resumed session '[bold]{session_name}[/bold]' ({msg_count} messages)[/swarm.accent]")
+            # Inject resume context so the model knows this is a restored session
+            if summary:
+                conversation.append({"role": "user", "content": f"[SESSION RESTORED] This is a continuation of a previous conversation named '{session_name}'. Here is a summary of what we discussed:\n{summary}\n\nPlease continue from where we left off."})
+                conversation.append({"role": "assistant", "content": f"I remember our previous conversation. I have the full history loaded ({len(saved_msgs)} messages). Let's continue where we left off."})
+            shared.console.print(f"[swarm.accent]Resumed session '[bold]{session_name}[/bold]' ({len(saved_msgs)} messages)[/swarm.accent]")
         else:
             shared.console.print(f"[swarm.accent]Started new session '[bold]{session_name}[/bold]'[/swarm.accent]")
         shared.console.print()
@@ -1431,6 +1463,13 @@ async def _chat_async(session_name: str | None = None):
         except Exception as e:
             shared.console.print(f"[swarm.error]Error: {e}[/swarm.error]")
         finally:
+            # Auto-save on any exit (crash, Ctrl+C, exception) if session is named
+            if session_name and conversation and len(conversation) > 1:
+                try:
+                    save_session(session_name, conversation)
+                    shared.console.print(f"[swarm.dim]Session '{session_name}' auto-saved.[/swarm.dim]")
+                except Exception:
+                    pass
             shared._clear_status()
             if _toolbar_spinner_task:
                 _toolbar_spinner_task.cancel()
