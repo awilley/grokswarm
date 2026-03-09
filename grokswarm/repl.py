@@ -903,12 +903,13 @@ async def _chat_async(session_name: str | None = None):
         cost_str = f"${shared.state.project_cost_usd:.3f}"
         vi_tag = " <ansicyan>[VI]</ansicyan>" if getattr(shared.state, 'vi_mode', False) else ""
         claude_tag = " <ansimagenta>[CLAUDE]</ansimagenta>" if getattr(shared.state, 'claude_mode', False) else ""
+        dualhead_tag = " <ansimagenta>[DUALHEAD]</ansimagenta>" if getattr(shared.state, 'dualhead_mode', False) else ""
         parts.append(
             f"  <ansidarkgray>{proj_name}</ansidarkgray>"
             f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{model_short}</ansidarkgray>"
             f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{tok_str} tok</ansidarkgray>"
             f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{cost_str}</ansidarkgray>"
-            f"{ctx_tag}{vi_tag}{claude_tag}"
+            f"{ctx_tag}{vi_tag}{claude_tag}{dualhead_tag}"
             f" <ansidarkgray>|</ansidarkgray> <ansimagenta>\u25b6\u25b6</ansimagenta> {mode_str}"
         )
         return HTML("\n".join(parts))
