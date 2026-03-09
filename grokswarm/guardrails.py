@@ -635,8 +635,9 @@ class LessonsDB:
                 file_overlap = len(set(files) & set(lesson["files"]))
                 if file_overlap > 0:
                     score += file_overlap * 3.0
-            # Frequency bonus
-            score += min(lesson.get("count", 1), 5) * 0.5
+            # Frequency bonus (only as tiebreaker when already relevant)
+            if score > 0:
+                score += min(lesson.get("count", 1), 5) * 0.5
             if score > 0:
                 scored.append((score, lesson))
 
@@ -719,7 +720,7 @@ class CostGuard:
 _DYNAMIC_TOOL_RULES: list[tuple[re.Pattern, set[str]]] = [
     (re.compile(r'\b(screenshot|visual|ui|tui|display|render|screen)\b', re.I),
      {"capture_tui_screenshot", "analyze_image", "run_app_capture"}),
-    (re.compile(r'\b(test|spec|assert|verify|check)\b', re.I),
+    (re.compile(r'\b(tests?|spec|assert|verify|check)\b', re.I),
      {"run_tests"}),
     (re.compile(r'\b(run|execute|launch|start|deploy|install|build)\b', re.I),
      {"run_shell"}),

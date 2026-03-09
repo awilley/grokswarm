@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -1546,6 +1547,7 @@ class TestSyntax:
 from grokswarm.guardrails import (
     PlanGate, GoalVerifier, LoopDetector, EvidenceTracker, ToolFilter,
     _extract_files_from_plan, notify, drain_notifications,
+    TaskComplexity, LessonsDB, CostGuard, DynamicTools,
 )
 from grokswarm.models import AgentInfo, AgentState, SubTask, TaskDAG
 
@@ -1856,3 +1858,221 @@ class TestGetAgentToolSchemas:
         assert "update_plan" in names  # always included
         assert "write_file" not in names
         assert "edit_file" not in names
+
+
+# ---------------------------------------------------------------------------
+# TaskComplexity tests
+# ---------------------------------------------------------------------------
+
+class TestTaskComplexity:
+    def test_simple_typo_fix(self):
+        assert TaskComplexity.classify("fix the typo in readme") == "simple"
+
+    def test_simple_add_docstring(self):
+        assert TaskComplexity.classify("add a docstring to the main function") == "simple"
+
+    def test_simple_rename(self):
+        assert TaskComplexity.classify("rename foo to bar") == "simple"
+
+    def test_simple_delete_unused_import(self):
+        assert TaskComplexity.classify("delete the unused import at the top") == "simple"
+
+    def test_simple_short_task(self):
+        # Under 12 words, no complex indicators -> simple
+        assert TaskComplexity.classify("fix the bug in login") == "simple"
+
+    def test_complex_refactor(self):
+        assert TaskComplexity.classify("refactor the authentication module") == "complex"
+
+    def test_complex_implement_new(self):
+        assert TaskComplexity.classify("implement a new user authentication system") == "complex"
+
+    def test_complex_multi_part(self):
+        assert TaskComplexity.classify("update the config and then also fix the tests") == "complex"
+
+    def test_complex_integration(self):
+        assert TaskComplexity.classify("integrate the payment gateway with stripe") == "complex"
+
+    def test_moderate_medium_length(self):
+        # 15-30 words, no explicit patterns
+        task = "update the function to handle edge cases where the input is empty or None and return a default value"
+        assert TaskComplexity.classify(task) == "moderate"
+
+    def test_should_skip_planning_simple(self):
+        assert TaskComplexity.should_skip_planning("fix a typo in config") is True
+
+    def test_should_skip_planning_complex(self):
+        assert TaskComplexity.should_skip_planning("refactor the entire database layer") is False
+
+
+# ---------------------------------------------------------------------------
+# LessonsDB tests
+# ---------------------------------------------------------------------------
+
+class TestLessonsDB:
+    def test_record_and_find(self, tmp_path):
+        db = LessonsDB(path=tmp_path / "lessons.yaml")
+        db.record_lesson(
+            error_signature="ImportError: cannot import name Foo from bar",
+            fix_description="Added Foo to bar/__init__.py exports",
+            files_involved=["bar/__init__.py", "main.py"],
+            expert="coder",
+        )
+        results = db.find_relevant(
+            error_signature="ImportError: cannot import name Foo from bar",
+            files=["bar/__init__.py"],
+        )
+        assert len(results) == 1
+        assert "Foo" in results[0]["error_sig"]
+        assert results[0]["count"] == 1
+
+    def test_deduplication(self, tmp_path):
+        db = LessonsDB(path=tmp_path / "lessons.yaml")
+        db.record_lesson("same error sig here", "fix A", ["f.py"])
+        db.record_lesson("same error sig here", "fix B", ["f.py"])
+        lessons = db._load()
+        assert len(lessons) == 1
+        assert lessons[0]["count"] == 2
+        assert lessons[0]["fix"] == "fix B"  # updated
+
+    def test_find_by_file_overlap(self, tmp_path):
+        db = LessonsDB(path=tmp_path / "lessons.yaml")
+        db.record_lesson("error alpha", "fix alpha", ["a.py", "b.py"])
+        db.record_lesson("error beta", "fix beta", ["c.py", "d.py"])
+        results = db.find_relevant(files=["a.py"])
+        # Both may score > 0 due to frequency bonus, but alpha should rank first
+        assert len(results) >= 1
+        assert results[0]["fix"] == "fix alpha"
+
+    def test_find_returns_empty_when_no_match(self, tmp_path):
+        db = LessonsDB(path=tmp_path / "lessons.yaml")
+        db.record_lesson("specific error", "specific fix", ["x.py"])
+        results = db.find_relevant(error_signature="totally unrelated")
+        assert len(results) == 0
+
+    def test_format_for_prompt(self, tmp_path):
+        db = LessonsDB(path=tmp_path / "lessons.yaml")
+        db.record_lesson("TypeError: int vs str", "cast to str first", ["util.py"])
+        lessons = db.find_relevant(error_signature="TypeError: int vs str mismatch")
+        formatted = db.format_for_prompt(lessons)
+        assert "LESSONS FROM PREVIOUS SESSIONS" in formatted
+        assert "TypeError" in formatted
+        assert "cast to str" in formatted
+
+    def test_format_empty(self, tmp_path):
+        db = LessonsDB(path=tmp_path / "lessons.yaml")
+        assert db.format_for_prompt([]) == ""
+
+    def test_max_50_lessons(self, tmp_path):
+        db = LessonsDB(path=tmp_path / "lessons.yaml")
+        for i in range(60):
+            db.record_lesson(f"error {i} unique", f"fix {i}", [f"file{i}.py"])
+        lessons = db._load()
+        assert len(lessons) == 50
+
+
+# ---------------------------------------------------------------------------
+# CostGuard tests
+# ---------------------------------------------------------------------------
+
+class TestCostGuard:
+    def test_no_warnings_under_threshold(self):
+        cg = CostGuard()
+        actions = cg.check(0.50)
+        assert len(actions) == 0
+
+    def test_warns_at_threshold(self):
+        cg = CostGuard()
+        actions = cg.check(1.0)
+        assert any("warn:$1" in a for a in actions)
+
+    def test_warns_once_per_threshold(self):
+        cg = CostGuard()
+        cg.check(1.0)  # first warn
+        actions = cg.check(1.5)  # no new threshold
+        assert len(actions) == 0
+
+    def test_multiple_thresholds(self):
+        cg = CostGuard()
+        cg.check(1.0)
+        actions = cg.check(5.0)
+        assert any("warn:$5" in a for a in actions)
+
+    def test_pause_on_budget_exceeded(self):
+        cg = CostGuard()
+        cg.set_budget(2.0)
+        actions = cg.check(2.5)
+        assert "pause_all" in actions
+
+    def test_no_pause_without_budget(self):
+        cg = CostGuard()
+        actions = cg.check(100.0)  # high cost but no budget set
+        assert "pause_all" not in actions
+
+    def test_rate_alarm(self):
+        cg = CostGuard()
+        now = time.time()
+        # Simulate $3 spent in last 60 seconds
+        cg.cost_timestamps = [(now - 10, 1.5), (now - 5, 1.5)]
+        actions = cg.check(3.0)
+        assert any("rate_alarm" in a for a in actions)
+
+    def test_rate_no_alarm_when_slow(self):
+        cg = CostGuard()
+        now = time.time()
+        # $0.10 in last 60 seconds — well under $2/min
+        cg.cost_timestamps = [(now - 30, 0.10)]
+        actions = cg.check(0.10)
+        assert not any("rate_alarm" in a for a in actions)
+
+    def test_record_cost_trims_old(self):
+        cg = CostGuard()
+        old_time = time.time() - 400  # >5 min ago
+        cg.cost_timestamps = [(old_time, 1.0)]
+        cg.record_cost(0.01)
+        assert len(cg.cost_timestamps) == 1  # old one trimmed
+
+
+# ---------------------------------------------------------------------------
+# DynamicTools tests
+# ---------------------------------------------------------------------------
+
+class TestDynamicTools:
+    def test_screenshot_keywords(self):
+        extras = DynamicTools.infer_extra_tools("take a screenshot of the UI")
+        assert "capture_tui_screenshot" in extras
+        assert "analyze_image" in extras
+
+    def test_test_keywords(self):
+        extras = DynamicTools.infer_extra_tools("run the test suite and verify")
+        assert "run_tests" in extras
+
+    def test_git_keywords(self):
+        extras = DynamicTools.infer_extra_tools("commit the changes and push")
+        assert "git_commit" in extras
+        assert "git_status" in extras
+
+    def test_no_extras_for_plain_task(self):
+        extras = DynamicTools.infer_extra_tools("add a docstring to the function")
+        assert len(extras) == 0
+
+    def test_merge_with_expert_tools(self):
+        expert = {"read_file", "write_file"}
+        merged = DynamicTools.merge_tools(expert, "run the tests")
+        assert "run_tests" in merged
+        assert "read_file" in merged
+        assert "write_file" in merged
+
+    def test_merge_no_whitelist_returns_none(self):
+        result = DynamicTools.merge_tools(None, "run the tests")
+        assert result is None  # None = all tools
+
+    def test_merge_no_extras(self):
+        expert = {"read_file", "write_file"}
+        merged = DynamicTools.merge_tools(expert, "add a docstring")
+        assert merged == expert
+
+    def test_web_search_keywords(self):
+        extras = DynamicTools.infer_extra_tools("search the web for API documentation")
+        assert "web_search" in extras
+        assert "fetch_page" in extras
