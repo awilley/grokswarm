@@ -834,3 +834,41 @@ TOOL_DISPATCH["send_message"] = lambda args: _send_message_impl("user", args["to
 TOOL_DISPATCH["check_messages"] = lambda args: _check_messages_impl(args.get("agent_name", "*"), args.get("since_id", 0))
 TOOL_DISPATCH["list_agents"] = lambda args: _list_agents_impl()
 TOOL_DISPATCH["wait_for_agent"] = lambda args: _wait_for_agent_impl(args["name"], args.get("timeout", 300))
+
+
+# ---------------------------------------------------------------------------
+# Subprocess-based agent execution (multi-process parallelism)
+# ---------------------------------------------------------------------------
+
+def spawn_expert_subprocess(
+    expert: str,
+    task_desc: str,
+    *,
+    name: str | None = None,
+    timeout: int = 600,
+) -> subprocess.Popen:
+    """Spawn an expert in a separate Python process.
+
+    Uses the same SwarmBus (SQLite) for coordination, so results
+    are visible to other agents and the REPL dashboard.
+
+    Returns the Popen object for monitoring.
+    """
+    display_name = name or f"worker_{expert}"
+    cmd = [
+        sys.executable, "-m", "grokswarm.commands",
+        "expert", expert, task_desc,
+    ]
+    env = dict(__import__("os").environ)
+    env["GROKSWARM_AGENT_NAME"] = display_name
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        cwd=str(shared.PROJECT_DIR),
+    )
+    shared._log(f"spawned subprocess worker: {display_name} (pid={proc.pid})")
+    bus = get_bus()
+    bus.post(display_name, f"Subprocess worker started for: {task_desc[:100]}", kind="status")
+    return proc
