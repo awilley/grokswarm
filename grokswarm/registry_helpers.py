@@ -65,6 +65,31 @@ def prune_memory(max_age_days: int = 30) -> int:
     return deleted
 
 
+def startup_cleanup(memory_max_days: int = 30, bus_max_days: int = 7) -> dict:
+    """Run on REPL startup: prune old memory + bus messages. Returns stats."""
+    stats = {"memory_pruned": 0, "bus_pruned": 0}
+    # Prune old memory files
+    try:
+        stats["memory_pruned"] = prune_memory(memory_max_days)
+    except Exception:
+        pass
+    # Prune old bus messages
+    try:
+        bus_db = shared.PROJECT_DIR / ".grokswarm" / "bus.db"
+        if bus_db.exists():
+            import sqlite3
+            conn = sqlite3.connect(str(bus_db))
+            cutoff = (datetime.now().timestamp() - bus_max_days * 86400)
+            cutoff_str = datetime.fromtimestamp(cutoff).strftime("%Y-%m-%d %H:%M:%S")
+            cur = conn.execute("DELETE FROM messages WHERE ts < ?", (cutoff_str,))
+            stats["bus_pruned"] = cur.rowcount
+            conn.commit()
+            conn.close()
+    except Exception:
+        pass
+    return stats
+
+
 def find_relevant_memories(expert_name: str, task_desc: str, max_results: int = 3) -> list[dict]:
     """Find memory entries relevant to the given expert and task.
 

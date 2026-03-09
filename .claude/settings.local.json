@@ -19,7 +19,9 @@
       "Bash(grep:*)",
       "Bash(ls:*)",
       "Bash(find:*)",
-      "Bash(PYTHONUTF8=1 python:*)"
+      "Bash(PYTHONUTF8=1 python:*)",
+      "Bash(test:*)",
+      "Bash(rm:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

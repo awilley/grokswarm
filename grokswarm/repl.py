@@ -649,6 +649,11 @@ def main(
             shared.PROJECT_CONTEXT = scan_project_context_cached(shared.PROJECT_DIR)
         shared.SYSTEM_PROMPT = build_system_prompt(shared.PROJECT_CONTEXT)
         _load_project_costs()
+        # Auto-prune old memory + bus messages on startup
+        from grokswarm.registry_helpers import startup_cleanup
+        cleanup = startup_cleanup()
+        if cleanup["memory_pruned"] or cleanup["bus_pruned"]:
+            shared.console.print(f"[swarm.dim]  cleanup: pruned {cleanup['memory_pruned']} old memories, {cleanup['bus_pruned']} old bus messages[/swarm.dim]")
         asyncio.run(_chat_async(session_name=session))
 
 
