@@ -18,6 +18,7 @@ from grokswarm.tools_git import (
 from grokswarm.tools_browser import fetch_page, screenshot_page, extract_links
 from grokswarm.tools_search import web_search, x_search, code_execution
 from grokswarm.context import find_symbol, find_references
+from grokswarm.bugs import report_bug_impl, list_bugs_impl, update_bug_impl
 
 
 # -- Tool Schemas --
@@ -572,6 +573,55 @@ TOOL_SCHEMAS = [
             }
         }
     },
+    # -- Bug Tracking --
+    {
+        "type": "function",
+        "function": {
+            "name": "report_bug",
+            "description": "Report a bug you've found. Use scope='project' for bugs in the project code, scope='self' for bugs in GrokSwarm itself.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Short bug title (one line)."},
+                    "description": {"type": "string", "description": "Detailed bug description including steps to reproduce, expected vs actual behavior."},
+                    "severity": {"type": "string", "enum": ["low", "medium", "high", "critical"], "description": "Bug severity. Default: medium."},
+                    "scope": {"type": "string", "enum": ["project", "self"], "description": "Where to log: 'project' for project bugs, 'self' for GrokSwarm bugs. Default: project."},
+                },
+                "required": ["title", "description"],
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_bugs",
+            "description": "List tracked bugs. Use scope='project' for project bugs, scope='self' for GrokSwarm self-bugs.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scope": {"type": "string", "enum": ["project", "self"], "description": "Which tracker: 'project' or 'self'. Default: project."},
+                    "status": {"type": "string", "enum": ["open", "in_progress", "fixed", "wont_fix", "duplicate", "all"], "description": "Filter by status. Default: open."},
+                },
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_bug",
+            "description": "Update a bug's status or severity.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bug_id": {"type": "integer", "description": "The bug ID number."},
+                    "status": {"type": "string", "enum": ["open", "in_progress", "fixed", "wont_fix", "duplicate"], "description": "New status."},
+                    "severity": {"type": "string", "enum": ["low", "medium", "high", "critical"], "description": "New severity."},
+                    "scope": {"type": "string", "enum": ["project", "self"], "description": "Which tracker. Default: project."},
+                },
+                "required": ["bug_id"],
+            }
+        }
+    },
 ]
 
 
@@ -611,6 +661,9 @@ TOOL_DISPATCH = {
     "analyze_image": lambda args: analyze_image(args["path"], args.get("question", "Describe this image in detail."), args.get("detail", "auto")),
     "generate_image": lambda args: generate_image(args["prompt"], args.get("n", 1), args.get("size", "1024x1024")),
     "edit_image": lambda args: edit_image(args["image_path"], args["prompt"]),
+    "report_bug": lambda args: report_bug_impl(args["title"], args["description"], args.get("severity", "medium"), args.get("scope", "project")),
+    "list_bugs": lambda args: list_bugs_impl(args.get("scope", "project"), args.get("status", "open")),
+    "update_bug": lambda args: update_bug_impl(args["bug_id"], args.get("status", ""), args.get("severity", ""), args.get("scope", "project")),
 }
 
 
@@ -624,6 +677,7 @@ READ_ONLY_TOOLS = {
     "web_search", "x_search", "code_execution",
     "analyze_image",
     "check_messages", "list_agents",
+    "list_bugs", "report_bug", "update_bug",
 }
 
 _FILE_MUTATION_TOOLS = {"edit_file", "write_file"}

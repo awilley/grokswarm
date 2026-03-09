@@ -677,6 +677,11 @@ Rules:
     except Exception as e:
         agent.transition(AgentState.ERROR)
         shared.console.print(f"[swarm.error]Expert {data['name']} ({display_name}) API error: {e}[/swarm.error]")
+        try:
+            from grokswarm.bugs import log_exception
+            log_exception(e, context_label=f"Expert:{data['name']}({display_name})")
+        except Exception:
+            pass
         return f"Error: {e}"
     finally:
         shared.state.agent_mode -= 1
@@ -711,6 +716,11 @@ async def _spawn_agent_impl(expert: str, task: str, name: str | None = None,
             if agent:
                 agent.transition(AgentState.ERROR)
             get_bus().post(name, f"Agent error: {e}", recipient="*", kind="error")
+            try:
+                from grokswarm.bugs import log_exception
+                log_exception(e, context_label=f"BackgroundAgent:{name}")
+            except Exception:
+                pass
 
     try:
         bg_task = asyncio.create_task(_agent_task())

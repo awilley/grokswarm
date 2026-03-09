@@ -85,6 +85,7 @@ class SwarmCompleter(Completer):
         "/resume": "Resume a paused agent: /resume <name>",
         "/context": "Show project context",
         "/session": "Manage sessions",
+        "/bugs": "View/manage bugs: /bugs [self|project] [add|fix ID]",
         "/model": "View/set model tiers: /model [tier] [model-name]",
         "/budget": "Set/view session cost limit: /budget [amount]",
         "/approve": "Approve agent plan: /approve <name>",
@@ -99,6 +100,7 @@ class SwarmCompleter(Completer):
     PATH_COMMANDS = {"read", "edit", "list"}
     PROJECT_SUBCMDS = ["list", "switch"]
     MODEL_SUBCMDS = ["list", "reset", "fast", "reasoning", "hardcore", "multi_agent"]
+    BUGS_SUBCMDS = ["list", "add", "show", "fix", "self", "project"]
 
     def __init__(self):
         self._path_completer = PathCompleter(only_directories=False, expanduser=True,
@@ -138,6 +140,11 @@ class SwarmCompleter(Completer):
         elif cmd == "model":
             if not arg_text.endswith(" "):
                 for sc in self.MODEL_SUBCMDS:
+                    if sc.startswith(arg_text.lower()):
+                        yield Completion(sc, start_position=-len(arg_text))
+        elif cmd == "bugs":
+            if not arg_text.endswith(" "):
+                for sc in self.BUGS_SUBCMDS:
                     if sc.startswith(arg_text.lower()):
                         yield Completion(sc, start_position=-len(arg_text))
         elif cmd == "project":
@@ -814,7 +821,7 @@ async def _chat_async(session_name: str | None = None):
                                                        "doctor", "dashboard", "metrics", "context", "experts", "skills",
                                                        "trust", "readonly", "git", "list", "read", "search", "grep",
                                                        "session", "project", "undo", "budget", "peek", "pause", "resume",
-                                                       "approve", "reject", "model"}:
+                                                       "approve", "reject", "model", "bugs"}:
                         shared.console.print("[swarm.dim]Busy processing previous prompt. Wait, or use /abort.[/swarm.dim]")
                         continue
 
@@ -1229,6 +1236,69 @@ async def _chat_async(session_name: str | None = None):
                                 shared.console.print(f"[swarm.warning]{e}[/swarm.warning]")
                         else:
                             shared.console.print("[swarm.dim]Usage: /model [list|reset|<tier> <model-name>][/swarm.dim]")
+
+                    elif cmd == "bugs":
+                        from grokswarm.bugs import get_self_tracker, get_project_tracker, log_project_bug
+                        bug_parts = arg.split() if arg else []
+                        scope = "project"
+                        if bug_parts and bug_parts[0] in ("self", "project"):
+                            scope = bug_parts.pop(0)
+                        tracker = get_self_tracker() if scope == "self" else get_project_tracker()
+                        action = bug_parts[0] if bug_parts else "list"
+                        if action == "list" or not bug_parts:
+                            bugs = tracker.list()
+                            if not bugs:
+                                shared.console.print(f"[swarm.dim]No bugs in {scope} tracker.[/swarm.dim]")
+                            else:
+                                tbl = Table(title=f"{scope.title()} Bugs ({len(bugs)})", show_header=True, header_style="bold")
+                                tbl.add_column("#", style="bold", width=4)
+                                tbl.add_column("Sev", width=8)
+                                tbl.add_column("Status", width=11)
+                                tbl.add_column("Title")
+                                tbl.add_column("Source", width=6)
+                                for b in bugs:
+                                    sev_color = {"critical": "red", "high": "yellow", "medium": "cyan", "low": "dim"}.get(b.severity, "")
+                                    tbl.add_row(str(b.id), f"[{sev_color}]{b.severity}[/{sev_color}]", b.status, b.title, b.source)
+                                shared.console.print()
+                                shared.console.print(tbl)
+                                shared.console.print()
+                        elif action == "add":
+                            title = " ".join(bug_parts[1:]) if len(bug_parts) > 1 else ""
+                            if not title:
+                                shared.console.print("[swarm.dim]Usage: /bugs [self|project] add <title>[/swarm.dim]")
+                            else:
+                                bug = tracker.log(title, "", "medium", "user")
+                                shared.console.print(f"[swarm.accent]Bug #{bug.id} logged: {title}[/swarm.accent]")
+                        elif action == "fix" and len(bug_parts) >= 2:
+                            try:
+                                bid = int(bug_parts[1])
+                                updated = tracker.update(bid, status="fixed")
+                                if updated:
+                                    shared.console.print(f"[swarm.accent]Bug #{bid} marked as fixed.[/swarm.accent]")
+                                else:
+                                    shared.console.print(f"[swarm.warning]Bug #{bid} not found.[/swarm.warning]")
+                            except ValueError:
+                                shared.console.print("[swarm.dim]Usage: /bugs fix <id>[/swarm.dim]")
+                        elif action == "show" and len(bug_parts) >= 2:
+                            try:
+                                bid = int(bug_parts[1])
+                                bug = tracker.get(bid)
+                                if bug:
+                                    shared.console.print(f"\n[bold]Bug #{bug.id}[/bold] [{bug.severity}] [{bug.status}]")
+                                    shared.console.print(f"[bold]Title:[/bold] {bug.title}")
+                                    shared.console.print(f"[bold]Source:[/bold] {bug.source}")
+                                    shared.console.print(f"[bold]Created:[/bold] {bug.created}")
+                                    if bug.description:
+                                        shared.console.print(f"[bold]Description:[/bold]\n{bug.description[:500]}")
+                                    if bug.context:
+                                        shared.console.print(f"[bold]Context:[/bold] {json.dumps(bug.context, indent=2)[:300]}")
+                                    shared.console.print()
+                                else:
+                                    shared.console.print(f"[swarm.warning]Bug #{bid} not found.[/swarm.warning]")
+                            except ValueError:
+                                shared.console.print("[swarm.dim]Usage: /bugs show <id>[/swarm.dim]")
+                        else:
+                            shared.console.print("[swarm.dim]Usage: /bugs [self|project] [list|add <title>|show <id>|fix <id>][/swarm.dim]")
 
                     elif cmd == "self-improve":
                         if not arg:

@@ -1067,6 +1067,11 @@ class GuardrailPipeline:
             shared._log(f"agent {self.display_name}: loop detected (escalation #{self.loop_escalation_count})")
             _auto_print(f"WARNING: {self.display_name} stuck in loop (escalation #{self.loop_escalation_count})", level="warning")
 
+            # Auto-log to bug tracker
+            from grokswarm.bugs import log_loop_detection
+            error_sig = self.loop_detector.test_failures[-1] if self.loop_detector.test_failures else ""
+            log_loop_detection(self.display_name, self.loop_escalation_count, error_sig)
+
             if self.loop_escalation_count >= 3:
                 self.agent.transition(AgentState.PAUSED)
                 pause_msg = f"Agent {self.display_name} paused: stuck in loop after 3 escalations. Use /tell {self.display_name} to provide guidance or /resume {self.display_name}."

@@ -2244,3 +2244,131 @@ class TestModelConfig:
         agent.phase = "planning"
         model = gp.select_model()
         assert model == "grok-custom-hardcore"
+
+
+# -- Bug Tracker ---------------------------------------------------------------
+
+from grokswarm.bugs import BugTracker, Bug, log_self_bug, log_project_bug
+
+
+class TestBugTracker:
+    def test_log_and_list(self, tmp_path):
+        tracker = BugTracker(tmp_path / "bugs.json")
+        bug = tracker.log("test bug", "description here", "medium", "user")
+        assert bug.id == 1
+        assert bug.title == "test bug"
+        bugs = tracker.list()
+        assert len(bugs) == 1
+        assert bugs[0].id == 1
+
+    def test_multiple_bugs_increment_id(self, tmp_path):
+        tracker = BugTracker(tmp_path / "bugs.json")
+        b1 = tracker.log("bug 1", "desc 1")
+        b2 = tracker.log("bug 2", "desc 2")
+        b3 = tracker.log("bug 3", "desc 3")
+        assert b1.id == 1
+        assert b2.id == 2
+        assert b3.id == 3
+
+    def test_get_by_id(self, tmp_path):
+        tracker = BugTracker(tmp_path / "bugs.json")
+        tracker.log("first", "desc")
+        tracker.log("second", "desc")
+        bug = tracker.get(2)
+        assert bug is not None
+        assert bug.title == "second"
+
+    def test_get_missing_returns_none(self, tmp_path):
+        tracker = BugTracker(tmp_path / "bugs.json")
+        assert tracker.get(999) is None
+
+    def test_update_status(self, tmp_path):
+        tracker = BugTracker(tmp_path / "bugs.json")
+        tracker.log("fixme", "desc")
+        updated = tracker.update(1, status="fixed")
+        assert updated is not None
+        assert updated.status == "fixed"
+        # Verify persisted
+        bug = tracker.get(1)
+        assert bug.status == "fixed"
+
+    def test_update_missing_returns_none(self, tmp_path):
+        tracker = BugTracker(tmp_path / "bugs.json")
+        assert tracker.update(999, status="fixed") is None
+
+    def test_list_filter_status(self, tmp_path):
+        tracker = BugTracker(tmp_path / "bugs.json")
+        tracker.log("open bug", "desc")
+        tracker.log("fixed bug", "desc")
+        tracker.update(2, status="fixed")
+        open_bugs = tracker.list(status="open")
+        assert len(open_bugs) == 1
+        assert open_bugs[0].title == "open bug"
+
+    def test_list_filter_severity(self, tmp_path):
+        tracker = BugTracker(tmp_path / "bugs.json")
+        tracker.log("low", "desc", severity="low")
+        tracker.log("high", "desc", severity="high")
+        high_bugs = tracker.list(severity="high")
+        assert len(high_bugs) == 1
+        assert high_bugs[0].title == "high"
+
+    def test_count(self, tmp_path):
+        tracker = BugTracker(tmp_path / "bugs.json")
+        assert tracker.count() == 0
+        tracker.log("a", "desc")
+        tracker.log("b", "desc")
+        assert tracker.count() == 2
+        tracker.update(1, status="fixed")
+        assert tracker.count(status="open") == 1
+
+    def test_bug_context(self, tmp_path):
+        tracker = BugTracker(tmp_path / "bugs.json")
+        bug = tracker.log("with context", "desc", context={"file": "main.py", "line": 42})
+        loaded = tracker.get(1)
+        assert loaded.context["file"] == "main.py"
+        assert loaded.context["line"] == 42
+
+    def test_separate_self_and_project_trackers(self, tmp_path):
+        self_tracker = BugTracker(tmp_path / "self" / "bugs.json")
+        proj_tracker = BugTracker(tmp_path / "project" / "bugs.json")
+        self_tracker.log("grokswarm bug", "internal issue", source="auto")
+        proj_tracker.log("project bug", "code issue", source="agent")
+        assert len(self_tracker.list()) == 1
+        assert len(proj_tracker.list()) == 1
+        assert self_tracker.list()[0].title == "grokswarm bug"
+        assert proj_tracker.list()[0].title == "project bug"
+
+    def test_tool_schemas_registered(self):
+        from grokswarm.tools_registry import TOOL_DISPATCH, TOOL_SCHEMAS
+        assert "report_bug" in TOOL_DISPATCH
+        assert "list_bugs" in TOOL_DISPATCH
+        assert "update_bug" in TOOL_DISPATCH
+        schema_names = {s["function"]["name"] for s in TOOL_SCHEMAS}
+        assert "report_bug" in schema_names
+        assert "list_bugs" in schema_names
+        assert "update_bug" in schema_names
+
+    def test_bugs_in_slash_commands(self):
+        from grokswarm.repl import SwarmCompleter
+        assert "/bugs" in SwarmCompleter.SLASH_COMMANDS
+
+    def test_report_bug_impl(self, tmp_path):
+        from grokswarm.bugs import report_bug_impl, get_project_tracker, _project_tracker, _project_tracker_dir
+        import grokswarm.bugs as bugs_mod
+        old_tracker = bugs_mod._project_tracker
+        old_dir = bugs_mod._project_tracker_dir
+        bugs_mod._project_tracker = BugTracker(tmp_path / ".grokswarm" / "bugs.json")
+        bugs_mod._project_tracker_dir = tmp_path
+        try:
+            result = report_bug_impl("test title", "test desc", "high", "project")
+            assert "#1" in result
+            assert "test title" in result
+        finally:
+            bugs_mod._project_tracker = old_tracker
+            bugs_mod._project_tracker_dir = old_dir
+
+    def test_bug_read_only_safe(self):
+        from grokswarm.tools_registry import READ_ONLY_TOOLS
+        assert "list_bugs" in READ_ONLY_TOOLS
+        assert "report_bug" in READ_ONLY_TOOLS

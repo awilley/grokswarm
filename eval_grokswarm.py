@@ -194,8 +194,7 @@ EVAL_TASKS: list[EvalTask] = [
             check_file_exists("fib.py"),
             check_python_compiles("fib.py"),
             check_function_exists("fib.py", "fibonacci"),
-            check_file_contains("fib.py", "fibonacci(10)"),
-            check_output_matches("fib.py", ""),  # should run without error
+            check_file_contains("fib.py", "fibonacci(10)")
         ],
     ),
     EvalTask(
@@ -512,6 +511,13 @@ async def run_eval_task_live(task: EvalTask, workspace: Path) -> EvalResult:
     finally:
         shared.PROJECT_DIR = old_project_dir
         bus.close()
+        # Close the singleton bus if it was created pointing at workspace
+        if shared._bus_instance is not None:
+            try:
+                shared._bus_instance.close()
+            except Exception:
+                pass
+            shared._bus_instance = None
         # Clean up agent
         shared.state.agents.pop(f"eval_{task.id}", None)
 

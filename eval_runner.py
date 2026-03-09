@@ -25,6 +25,13 @@ project_root = str(Path(__file__).parent)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+# Load .env if present
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Ensure API key is set
 if not os.environ.get("XAI_API_KEY"):
     print("ERROR: XAI_API_KEY not set. Export it or create .env file.")

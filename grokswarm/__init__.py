@@ -91,6 +91,13 @@ from grokswarm.tools_registry import (
     _invoke_skill, _register_skill_tool, _load_skill_tools,
 )
 
+# -- bugs --
+from grokswarm.bugs import (
+    BugTracker, Bug, get_self_tracker, get_project_tracker,
+    log_self_bug, log_project_bug, log_exception,
+    report_bug_impl, list_bugs_impl, update_bug_impl,
+)
+
 # -- tools_mcp --
 from grokswarm.tools_mcp import register_mcp_tools, _load_mcp_config, _discover_mcp_tools, _call_mcp_tool
 
