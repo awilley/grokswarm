@@ -20,28 +20,39 @@ from xai_sdk.chat import (
 )
 
 # ---------------------------------------------------------------------------
-# Client management
+# Client management  (lazy — AsyncClient created on first use inside the
+# running event-loop so gRPC channels bind to the correct loop)
 # ---------------------------------------------------------------------------
 
 _client: AsyncClient | None = None
+_api_key: str | None = None
+_timeout: int = 3600
 
 
-def init_client(api_key: str, timeout: int = 3600) -> AsyncClient:
-    """Create (or replace) the global AsyncClient."""
-    global _client
-    _client = AsyncClient(api_key=api_key, timeout=timeout)
-    return _client
+def init_client(api_key: str, timeout: int = 3600) -> None:
+    """Store credentials. The actual AsyncClient is created lazily on first use."""
+    global _api_key, _timeout, _client
+    _api_key = api_key
+    _timeout = timeout
+    _client = None  # force re-creation on next get_client()
 
 
-def reset_client(api_key: str, timeout: int = 3600) -> AsyncClient:
-    """Replace the global client (e.g. after API-key change)."""
-    return init_client(api_key, timeout)
+def reset_client(api_key: str, timeout: int = 3600) -> None:
+    """Replace credentials and invalidate any existing client."""
+    init_client(api_key, timeout)
 
 
 def get_client() -> AsyncClient:
-    """Return the current AsyncClient. Raises if not initialised."""
+    """Return the current AsyncClient, creating it lazily if needed.
+
+    Must be called from inside a running asyncio event-loop so gRPC
+    channels bind to the correct loop.
+    """
+    global _client
     if _client is None:
-        raise RuntimeError("LLM client not initialised — call llm.init_client() first")
+        if _api_key is None:
+            raise RuntimeError("LLM client not initialised — call llm.init_client() first")
+        _client = AsyncClient(api_key=_api_key, timeout=_timeout)
     return _client
 
 
