@@ -19,6 +19,7 @@ from grokswarm.tools_test import _lint_file, _run_tests_raw, _detect_test_framew
 MAX_TOOL_ROUNDS = 10
 MAX_TOOL_RESULT_SIZE = 12000
 MAX_STREAM_RETRIES = 2
+STREAM_TIMEOUT_SEC = 180  # Timeout per streaming request (3 minutes)
 
 MAX_CONVERSATION_MESSAGES = 40
 COMPACTION_THRESHOLD = 50
@@ -311,15 +312,19 @@ async def _execute_tool(name: str, args: dict, timed: bool = False):
     handler = TOOL_DISPATCH.get(name)
     if handler:
         try:
-            if is_threadable:
-                result = await asyncio.to_thread(handler, args)
-            elif shared._is_prompt_suspended:
-                # Prompt already suspended by batch -- run directly in thread
-                result = await asyncio.to_thread(handler, args)
+            # Probe: call handler to see if it returns a coroutine (async lambda/wrapper)
+            _is_async = asyncio.iscoroutinefunction(handler)
+            if _is_async:
+                # Direct async handler — await in event loop
+                result = await handler(args)
             else:
-                # One-off suspension (shouldn't happen with batch mode)
-                shared._clear_status()
-                result = await _suspend_prompt_and_run(lambda: handler(args))
+                # Sync handler — may still return a coroutine if it's a lambda wrapping async
+                if is_threadable or shared._is_prompt_suspended:
+                    result = await asyncio.to_thread(handler, args)
+                else:
+                    shared._clear_status()
+                    result = await _suspend_prompt_and_run(lambda: handler(args))
+                # If handler was a lambda wrapping an async func, result is a coroutine
                 if asyncio.iscoroutine(result):
                     result = await result
         except Exception as e:
@@ -470,12 +475,13 @@ async def _stream_with_tools(conversation: list) -> str:
                 _chat = llm.create_chat(shared.MODEL, tools=xai_tools, max_tokens=shared.MAX_TOKENS)
                 llm.populate_chat(_chat, _cache_messages)
                 # xai-sdk streaming: tool calls arrive complete (no incremental accumulation)
-                async for response, chunk in _chat.stream():
-                    stream_response = response
-                    if chunk.content:
-                        full_response += chunk.content
-                    for tc in chunk.tool_calls:
-                        collected_tool_calls.append(tc)
+                async with asyncio.timeout(STREAM_TIMEOUT_SEC):
+                    async for response, chunk in _chat.stream():
+                        stream_response = response
+                        if chunk.content:
+                            full_response += chunk.content
+                        for tc in chunk.tool_calls:
+                            collected_tool_calls.append(tc)
                 break
             except KeyboardInterrupt:
                 raise

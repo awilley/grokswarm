@@ -657,6 +657,9 @@ Rules:
                         tool_actions.append(tc.function.name)
                         if tc.function.name == "run_tests":
                             gp.ran_tests = True
+                        gp.on_tool_result(tc.function.name, tc_args, result_str, rounds_used)
+                    if gp.on_round_end(rounds_used, conversation):
+                        break
                 else:
                     break
             ev_summary, verification_issues = gp.on_completion(tool_actions, full_output, rounds_used, max_rounds)
