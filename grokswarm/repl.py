@@ -32,7 +32,7 @@ from grokswarm.tools_test import run_tests
 from grokswarm.tools_git import git_status, git_diff, git_log, git_branch
 from grokswarm.tools_search import web_search, x_search
 from grokswarm.tools_browser import fetch_page
-from grokswarm.registry_helpers import list_experts, list_skills
+from grokswarm.registry_helpers import list_experts, list_skills, list_memory, prune_memory
 from grokswarm.engine import _stream_with_tools, _trim_conversation
 from grokswarm.agents import (
     get_bus, run_supervisor, run_expert, _load_project_costs,
@@ -90,6 +90,8 @@ _cmd("budget",       "Set/view session cost limit")(lambda arg, ctx: None)
 _cmd("model",        "View/set model tiers")(lambda arg, ctx: None)
 _cmd("bugs",         "View/manage bugs")(lambda arg, ctx: None)
 _cmd("self-improve", "Improve own source (shadow + test)",  allow_while_busy=False)(lambda arg, ctx: None)
+_cmd("memory",       "View/prune agent memory files")(lambda arg, ctx: None)
+_cmd("eval",         "Run evaluation harness",              allow_while_busy=False)(lambda arg, ctx: None)
 # fmt: on
 
 # -- Context-Aware Tab Completion --
@@ -113,6 +115,7 @@ class SwarmCompleter(Completer):
     PROJECT_SUBCMDS = ["list", "switch"]
     MODEL_SUBCMDS = ["list", "reset", "fast", "reasoning", "hardcore", "multi_agent"]
     BUGS_SUBCMDS = ["list", "add", "show", "fix", "self", "project"]
+    MEMORY_SUBCMDS = ["list", "prune"]
 
     # Class-level attribute — populated after class definition
     SLASH_COMMANDS: dict[str, str] = {}
@@ -160,6 +163,11 @@ class SwarmCompleter(Completer):
         elif cmd == "bugs":
             if not arg_text.endswith(" "):
                 for sc in self.BUGS_SUBCMDS:
+                    if sc.startswith(arg_text.lower()):
+                        yield Completion(sc, start_position=-len(arg_text))
+        elif cmd == "memory":
+            if not arg_text.endswith(" "):
+                for sc in self.MEMORY_SUBCMDS:
                     if sc.startswith(arg_text.lower()):
                         yield Completion(sc, start_position=-len(arg_text))
         elif cmd == "project":
@@ -1278,6 +1286,52 @@ async def _chat_async(session_name: str | None = None):
                         else:
                             shared.console.print("[swarm.dim]Usage: /bugs [self|project] [list|add <title>|show <id>|fix <id>][/swarm.dim]")
 
+                    elif cmd == "memory":
+                        mem_parts = arg.split() if arg else []
+                        action = mem_parts[0] if mem_parts else "list"
+                        if action == "list" or not mem_parts:
+                            entries = list_memory()
+                            if not entries:
+                                shared.console.print("[swarm.dim]No memory files.[/swarm.dim]")
+                            else:
+                                tbl = Table(title=f"Agent Memory ({len(entries)} files)")
+                                tbl.add_column("Key", ratio=1)
+                                tbl.add_column("Timestamp", width=20)
+                                tbl.add_column("Size", width=8, justify="right")
+                                for e in entries:
+                                    ts = e["timestamp"][:19].replace("T", " ") if e["timestamp"] != "?" else "?"
+                                    tbl.add_row(e["key"], ts, f"{e['size']:,}")
+                                shared.console.print()
+                                shared.console.print(tbl)
+                                shared.console.print()
+                        elif action == "prune":
+                            days = 30
+                            if len(mem_parts) > 1 and mem_parts[1].isdigit():
+                                days = int(mem_parts[1])
+                            deleted = prune_memory(days)
+                            shared.console.print(f"[swarm.accent]Pruned {deleted} memory file(s) older than {days} days.[/swarm.accent]")
+                        else:
+                            shared.console.print("[swarm.dim]Usage: /memory [list|prune [days]][/swarm.dim]")
+                    elif cmd == "eval":
+                        eval_script = shared.PROJECT_DIR / "eval_grokswarm.py"
+                        if not eval_script.exists():
+                            shared.console.print("[swarm.warning]eval_grokswarm.py not found in project directory.[/swarm.warning]")
+                        else:
+                            eval_args = [sys.executable, str(eval_script)]
+                            if arg:
+                                eval_args.extend(arg.split())
+                            else:
+                                eval_args.append("--live")
+                            shared.console.print(f"[swarm.dim]Running: {' '.join(eval_args)}[/swarm.dim]")
+                            proc = await asyncio.to_thread(
+                                subprocess.run, eval_args,
+                                capture_output=True, text=True, timeout=600,
+                                cwd=str(shared.PROJECT_DIR),
+                            )
+                            if proc.stdout:
+                                shared.console.print(proc.stdout[-3000:])
+                            if proc.returncode != 0 and proc.stderr:
+                                shared.console.print(f"[swarm.error]{proc.stderr[-1000:]}[/swarm.error]")
                     elif cmd == "self-improve":
                         if not arg:
                             shared.console.print("[swarm.warning]Usage: /self-improve <description of improvement>[/swarm.warning]")

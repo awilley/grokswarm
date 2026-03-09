@@ -86,13 +86,13 @@ class PlanGate:
 
     @staticmethod
     def check_plan_deviation(agent, tool_name: str, tool_args: dict) -> str | None:
-        """Warns if agent is editing files not mentioned in its plan."""
+        """Blocks file mutations not mentioned in the agent's approved plan."""
         if tool_name in ("edit_file", "write_file"):
             path = tool_args.get("path", "")
             if agent.plan_files_allowed and path not in agent.plan_files_allowed:
                 return (
-                    f"[WARNING] Editing '{path}' which was not in your approved plan. "
-                    "If this is intentional, update your plan first."
+                    f"[BLOCKED] Editing '{path}' which was not in your approved plan. "
+                    "Use update_plan to add this file to your plan first, then retry."
                 )
         return None
 
@@ -977,7 +977,11 @@ class GuardrailPipeline:
                     self.bus.post(self.display_name, f"Session budget exceeded (${shared.state.global_cost_usd:.2f}/${_cost_guard.session_budget_usd:.2f})", kind="status")
                 return True
             elif action.startswith("rate_alarm:"):
-                _auto_print(f"COST RATE ALARM: spending {action[11:]} -- consider pausing agents", level="warning")
+                _auto_print(f"COST RATE ALARM: spending {action[11:]} -- pausing agent to prevent runaway costs", level="error")
+                self.agent.transition(AgentState.PAUSED)
+                if self.bus:
+                    self.bus.post(self.display_name, f"Rate alarm: spending {action[11:]}, agent paused", kind="status")
+                return True
 
         # Per-agent budget check
         if not self.agent.check_budget():
@@ -995,7 +999,13 @@ class GuardrailPipeline:
         gate_error = PlanGate.check_tool_allowed(self.agent, tool_name)
         if gate_error:
             shared._log(f"agent {self.display_name}: PlanGate blocked {tool_name}")
-        return gate_error
+            return gate_error
+        # Plan deviation blocks file mutations to unapproved files
+        deviation = PlanGate.check_plan_deviation(self.agent, tool_name, args)
+        if deviation:
+            shared._log(f"agent {self.display_name}: plan deviation blocked {tool_name} on {args.get('path', '?')}")
+            return deviation
+        return None
 
     def _log_tool_call(self, tool_name: str, args: dict, result: str, round_num: int):
         """Append to agent's rolling tool call log for /peek visibility."""

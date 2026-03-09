@@ -32,6 +32,39 @@ def save_memory(key: str, content: str):
     (shared.MEMORY_DIR / f"{key}.json").write_text(json.dumps(entry, indent=2))
 
 
+def list_memory() -> list[dict]:
+    """Return all memory entries sorted newest-first."""
+    entries = []
+    for f in shared.MEMORY_DIR.glob("*.json"):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            entries.append({
+                "key": f.stem,
+                "timestamp": data.get("timestamp", ""),
+                "size": len(data.get("content", "")),
+            })
+        except Exception:
+            entries.append({"key": f.stem, "timestamp": "?", "size": 0})
+    entries.sort(key=lambda e: e["timestamp"], reverse=True)
+    return entries
+
+
+def prune_memory(max_age_days: int = 30) -> int:
+    """Delete memory files older than *max_age_days*. Returns count deleted."""
+    cutoff = datetime.now().timestamp() - (max_age_days * 86400)
+    deleted = 0
+    for f in shared.MEMORY_DIR.glob("*.json"):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            ts = datetime.fromisoformat(data["timestamp"]).timestamp()
+            if ts < cutoff:
+                f.unlink()
+                deleted += 1
+        except Exception:
+            continue
+    return deleted
+
+
 def propose_expert(name: str, mindset: str, objectives: list[str]) -> str:
     from rich.panel import Panel
     safe_name = name.lower().replace(" ", "_")
