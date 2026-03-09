@@ -65,6 +65,39 @@ def prune_memory(max_age_days: int = 30) -> int:
     return deleted
 
 
+def find_relevant_memories(expert_name: str, task_desc: str, max_results: int = 3) -> list[dict]:
+    """Find memory entries relevant to the given expert and task.
+
+    Matches by expert name in the key, or by keyword overlap between the
+    task description and the memory content.  Returns newest-first.
+    """
+    task_words = set(task_desc.lower().split())
+    scored: list[tuple[float, dict]] = []
+    for f in shared.MEMORY_DIR.glob("*.json"):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            content = data.get("content", "")
+            key = f.stem
+            score = 0.0
+            # Boost if same expert type
+            if expert_name and expert_name.lower() in key.lower():
+                score += 3.0
+            # Keyword overlap with task description
+            content_words = set(content.lower().split())
+            overlap = len(task_words & content_words)
+            score += min(overlap / max(len(task_words), 1), 2.0)
+            if score > 0.5:
+                scored.append((score, {
+                    "key": key,
+                    "timestamp": data.get("timestamp", ""),
+                    "content": content,
+                }))
+        except Exception:
+            continue
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [entry for _, entry in scored[:max_results]]
+
+
 def propose_expert(name: str, mindset: str, objectives: list[str]) -> str:
     from rich.panel import Panel
     safe_name = name.lower().replace(" ", "_")

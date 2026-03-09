@@ -80,7 +80,7 @@ from grokswarm.tools_image import analyze_image, generate_image, edit_image
 # -- registry_helpers --
 from grokswarm.registry_helpers import (
     seed_defaults, list_experts, list_skills, save_memory,
-    list_memory, prune_memory,
+    list_memory, prune_memory, find_relevant_memories,
     propose_expert, propose_skill, get_registry,
 )
 

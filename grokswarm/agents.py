@@ -510,7 +510,7 @@ Rules:
             gp.on_round_start(_round, max_rounds, conversation)
 
             # Select model (handles phase routing + escalation)
-            round_model = gp.select_model()
+            round_model = gp.select_model(_round)
 
             # -- API call --
             from grokswarm import llm

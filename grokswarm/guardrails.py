@@ -932,9 +932,10 @@ class GuardrailPipeline:
     # -- Setup (before loop) --
 
     def setup(self, conversation: list[dict]):
-        """Initialize guardrails: complexity skip, lessons injection."""
-        # Complexity-based planning skip
-        if TaskComplexity.should_skip_planning(self.task_desc):
+        """Initialize guardrails: complexity skip, lessons injection, memory retrieval."""
+        # Complexity-based planning skip + model routing
+        self._is_simple_task = TaskComplexity.should_skip_planning(self.task_desc)
+        if self._is_simple_task:
             self.agent.phase = "executing"
             shared._log(f"agent {self.display_name}: simple task, skipping planning phase")
 
@@ -948,6 +949,21 @@ class GuardrailPipeline:
         if relevant_lessons:
             lesson_text = self.lessons_db.format_for_prompt(relevant_lessons)
             conversation.append({"role": "user", "content": lesson_text})
+
+        # Inject relevant memories from past agent runs
+        from grokswarm.registry_helpers import find_relevant_memories
+        expert_name = self.expert_data.get("name", "")
+        memories = find_relevant_memories(expert_name, self.task_desc, max_results=2)
+        if memories:
+            mem_parts = []
+            for mem in memories:
+                # Truncate to keep context window reasonable
+                snippet = mem["content"][:600]
+                ts = mem["timestamp"][:19] if mem["timestamp"] else "?"
+                mem_parts.append(f"--- {mem['key']} ({ts}) ---\n{snippet}")
+            mem_text = "[PAST EXPERIENCE] Relevant results from previous agent runs:\n\n" + "\n\n".join(mem_parts)
+            conversation.append({"role": "user", "content": mem_text})
+            shared._log(f"agent {self.display_name}: injected {len(memories)} relevant memories")
 
     def get_tool_schemas(self):
         """Get filtered tool schemas based on expert + dynamic tools."""
@@ -993,12 +1009,19 @@ class GuardrailPipeline:
                     "content": "[SYSTEM] " + " ".join(stale_warnings),
                 })
 
-    def select_model(self) -> str:
-        """Select the right model based on phase + escalation state."""
+    def select_model(self, round_num: int = 0) -> str:
+        """Select the right model based on phase, task complexity, escalation, and round.
+
+        Simple tasks use the fast model. Read-only early rounds use fast to save cost.
+        Loop escalation overrides to hardcore.
+        """
         if self.model_escalated:
             model = self.escalation_model
         elif self.agent.phase == "planning":
             model = self.planning_model
+        elif self._is_simple_task and not self.made_file_mutations:
+            # Simple tasks that haven't started mutating files: use fast model
+            model = MODEL_ROUTING.get("fast", self.execution_model)
         else:
             model = self.execution_model
         self.evidence_tracker.record_model(model)
