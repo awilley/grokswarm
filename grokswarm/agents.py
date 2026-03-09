@@ -707,6 +707,18 @@ Rules:
             bus.post(display_name, report, kind="result")
         agent.transition(AgentState.DONE)
 
+        # Record completion in project intelligence
+        try:
+            from grokswarm.guardrails import LessonsDB
+            db = LessonsDB()
+            files_mod = list({a["args"].split(",")[0].strip().strip("'\"")
+                             for a in tool_actions
+                             if a["tool"] in ("edit_file", "write_file") and a.get("args")})[:10]
+            tools_used = list({a["tool"] for a in tool_actions})[:10]
+            db.record_completion(task_description, files_mod, tools_used, expert=display_name)
+        except Exception:
+            pass
+
         return full_output
     except Exception as e:
         agent.transition(AgentState.ERROR)

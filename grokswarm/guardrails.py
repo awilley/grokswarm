@@ -788,18 +788,68 @@ class LessonsDB:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [lesson for _, lesson in scored[:limit]]
 
+    def record_insight(self, category: str, insight: str,
+                       files: list[str] | None = None, expert: str = ""):
+        """Record a project insight (pattern, preference, architecture note)."""
+        lessons = self._load()
+        # Don't duplicate
+        for existing in lessons:
+            if existing.get("category") == category and existing.get("error_sig", "")[:60] == insight[:60]:
+                existing["count"] = existing.get("count", 1) + 1
+                existing["last_seen"] = datetime.now().isoformat()
+                self._save(lessons)
+                return
+        lessons.insert(0, {
+            "category": category,
+            "error_sig": insight[:200],
+            "fix": "",
+            "files": (files or [])[:10],
+            "expert": expert,
+            "count": 1,
+            "created": datetime.now().isoformat(),
+            "last_seen": datetime.now().isoformat(),
+        })
+        self._save(lessons)
+
+    def record_completion(self, task_desc: str, files_modified: list[str],
+                          tools_used: list[str], expert: str = ""):
+        """Record a successful task completion for project intelligence."""
+        # Only record if there's meaningful work
+        if not files_modified:
+            return
+        summary = f"Completed: {task_desc[:100]}"
+        if tools_used:
+            summary += f" (tools: {', '.join(tools_used[:5])})"
+        self.record_insight("completion", summary, files=files_modified, expert=expert)
+
     def format_for_prompt(self, lessons: list[dict]) -> str:
         """Format lessons into a system prompt injection."""
         if not lessons:
             return ""
-        lines = ["[SYSTEM -- LESSONS FROM PREVIOUS SESSIONS]",
-                 "These issues were encountered before in this project:"]
-        for i, lesson in enumerate(lessons, 1):
-            lines.append(f"  {i}. Error: {lesson['error_sig'][:100]}")
-            lines.append(f"     Fix: {lesson['fix'][:200]}")
-            if lesson.get("files"):
-                lines.append(f"     Files: {', '.join(lesson['files'][:5])}")
-        lines.append("Use this knowledge to avoid repeating the same mistakes.")
+        error_lessons = [l for l in lessons if l.get("fix")]
+        insight_lessons = [l for l in lessons if not l.get("fix") and l.get("category")]
+
+        lines = []
+        if error_lessons:
+            lines.append("[SYSTEM -- LESSONS FROM PREVIOUS SESSIONS]")
+            lines.append("These issues were encountered before in this project:")
+            for i, lesson in enumerate(error_lessons, 1):
+                lines.append(f"  {i}. Error: {lesson['error_sig'][:100]}")
+                lines.append(f"     Fix: {lesson['fix'][:200]}")
+                if lesson.get("files"):
+                    lines.append(f"     Files: {', '.join(lesson['files'][:5])}")
+            lines.append("Use this knowledge to avoid repeating the same mistakes.")
+
+        if insight_lessons:
+            lines.append("")
+            lines.append("[SYSTEM -- PROJECT INTELLIGENCE]")
+            lines.append("Known patterns and recent completions:")
+            for i, insight in enumerate(insight_lessons[:5], 1):
+                cat = insight.get("category", "note")
+                lines.append(f"  {i}. [{cat}] {insight['error_sig'][:150]}")
+                if insight.get("files"):
+                    lines.append(f"     Files: {', '.join(insight['files'][:5])}")
+
         return "\n".join(lines)
 
 
