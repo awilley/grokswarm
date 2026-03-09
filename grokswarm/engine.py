@@ -208,6 +208,14 @@ async def _suspend_prompt_and_run(func):
         _resume_prompt()
 
 
+_ERROR_PREFIXES = ("Error", "Cancelled", "Access denied", "Edit cancelled", "BLOCKED")
+
+
+def _is_tool_error(result_str: str) -> bool:
+    """Check if a tool result indicates an error. Centralises error detection."""
+    return result_str.startswith(_ERROR_PREFIXES)
+
+
 def _handle_test_failure(name: str, args: dict, result_str: str) -> str:
     """Track test failures and set up auto-retest state. Returns appended result_str."""
     if name == "run_tests" and result_str.startswith("[FAIL]"):
@@ -338,7 +346,7 @@ async def _execute_tool(name: str, args: dict, timed: bool = False):
         result_str = result_str[:MAX_TOOL_RESULT_SIZE] + f"\n... (truncated from {len(str(result)):,} chars to {MAX_TOOL_RESULT_SIZE:,})"
 
     lint_clean = False
-    if name in ("edit_file", "write_file") and not result_str.startswith(("Error", "Cancelled", "Access denied", "Edit cancelled")):
+    if name in ("edit_file", "write_file") and not _is_tool_error(result_str):
         edited_path = _safe_path(args.get("path", ""))
         if edited_path and edited_path.exists():
             lint_err = await asyncio.to_thread(_lint_file, edited_path)
@@ -353,7 +361,7 @@ async def _execute_tool(name: str, args: dict, timed: bool = False):
                 shared._log("lint clean")
                 lint_clean = True
 
-    if name in _FILE_MUTATION_TOOLS and not result_str.startswith(("Error", "Cancelled", "Access denied", "Edit cancelled")):
+    if name in _FILE_MUTATION_TOOLS and not _is_tool_error(result_str):
         edit_path = args.get("path", "")
         if _pre_edit_existed:
             shared.state.edit_history.append((edit_path, _pre_edit_content))
@@ -371,7 +379,7 @@ async def _execute_tool(name: str, args: dict, timed: bool = False):
                 shared.console.print(f"  [swarm.warning]\u26a0 {shared.state.pending_write_count} file mutations without a commit \u2014 consider git_commit for a checkpoint[/swarm.warning]")
             shared._log(f"{shared.state.pending_write_count} file mutations without commit")
             result_str += f"\n\n[AUTO-CHECKPOINT] You have made {shared.state.pending_write_count} file edits without committing. Consider using git_commit to create a checkpoint before continuing."
-    elif name == "git_commit" and not result_str.startswith("Error"):
+    elif name == "git_commit" and not _is_tool_error(result_str):
         shared.state.pending_write_count = 0
 
     result_str = _handle_test_failure(name, args, result_str)

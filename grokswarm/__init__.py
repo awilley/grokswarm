@@ -106,7 +106,7 @@ from grokswarm.engine import (
     _estimate_tokens, _repair_json,
     _compact_conversation, _trim_conversation,
     _suspend_prompt, _resume_prompt, _suspend_prompt_and_run,
-    _execute_tool, _tool_detail,
+    _execute_tool, _tool_detail, _is_tool_error, _ERROR_PREFIXES,
     _handle_test_failure, _maybe_auto_retest,
     _stream_with_tools,
     _THREADABLE_TOOLS_BASE, _THREADABLE_TOOLS_TRUSTED,
@@ -118,8 +118,8 @@ from grokswarm.engine import (
 # -- agents --
 from grokswarm.agents import (
     SwarmBus, get_bus,
-    _costs_file, _load_project_costs, _save_project_costs, _record_usage, _extract_cached_tokens,
-    EXPERT_DEFAULT_MAX_ROUNDS, _auto_checkpoint_before_agent,
+    _costs_file, _load_project_costs, _save_project_costs, _record_usage, _extract_cached_tokens, _cost_lock,
+    EXPERT_DEFAULT_MAX_ROUNDS, _auto_checkpoint_before_agent, _validate_expert_yaml,
     _detect_tech_stack, _build_completion_report,
     run_supervisor, run_expert,
     _spawn_agent_impl, _send_message_impl, _check_messages_impl, _list_agents_impl,
