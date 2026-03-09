@@ -850,7 +850,7 @@ async def _chat_async(session_name: str | None = None):
                 def get_message():
                     _cols = shutil.get_terminal_size((80, 20)).columns
                     line_str = "\u2500" * _cols
-                    parts = []
+                    parts = [""]  # blank line for breathing room
                     if shared._toolbar_status and not shared._is_prompt_suspended:
                         icon = shared.THINKING_FRAMES[shared._toolbar_spinner_idx % len(shared.THINKING_FRAMES)]
                         parts.append(f"  <ansicyan>{icon}</ansicyan> <ansidarkgray>{shared._toolbar_status}</ansidarkgray>")
@@ -876,9 +876,9 @@ async def _chat_async(session_name: str | None = None):
                     continue
 
                 lines = user_input.split('\n')
-                shared.console.print(f"[bold cyan]> [/bold cyan]{lines[0]}")
+                shared.console.print(f"[bold cyan]> [/bold cyan][bright_white]{lines[0]}[/bright_white]")
                 for l in lines[1:]:
-                    shared.console.print(f"  [dim]\u00b7 [/dim]{l}")
+                    shared.console.print(f"  [dim]\u00b7 [/dim][bright_white]{l}[/bright_white]")
 
                 # -- Slash Commands (dispatched via cmd_dispatch registry) --
                 if user_input.startswith("/"):
