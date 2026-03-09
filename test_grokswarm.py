@@ -1554,6 +1554,7 @@ from grokswarm.guardrails import (
     PlanGate, GoalVerifier, LoopDetector, EvidenceTracker, ToolFilter,
     _extract_files_from_plan, notify, drain_notifications,
     TaskComplexity, LessonsDB, CostGuard, DynamicTools, GuardrailPipeline,
+    Orchestrator,
 )
 from grokswarm.models import AgentInfo, AgentState, SubTask, TaskDAG
 
@@ -2016,6 +2017,63 @@ class TestTaskComplexity:
             "for token validation, session management, role checking, and password hashing. "
             "Each component should be a separate module with its own test suite."
         ) is True
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator._consolidate_dag tests
+# ---------------------------------------------------------------------------
+
+class TestConsolidateDAG:
+    def test_parallel_dag_kept(self):
+        """DAG with 2+ parallel roots is kept as-is."""
+        dag = TaskDAG(goal="build stuff", subtasks=[
+            SubTask(id="t1", description="module A", expert="coder"),
+            SubTask(id="t2", description="module B", expert="coder"),
+            SubTask(id="t3", description="run all tests", expert="coder", depends_on=["t1", "t2"]),
+        ])
+        result = Orchestrator._consolidate_dag(dag, "build stuff", "coder")
+        assert len(result.subtasks) == 3
+
+    def test_sequential_dag_collapsed(self):
+        """DAG where work tasks form a chain collapses to single agent."""
+        dag = TaskDAG(goal="build stuff", subtasks=[
+            SubTask(id="t1", description="step 1", expert="coder"),
+            SubTask(id="t2", description="step 2", expert="coder", depends_on=["t1"]),
+            SubTask(id="t3", description="verify all", expert="coder", depends_on=["t2"]),
+        ])
+        result = Orchestrator._consolidate_dag(dag, "build stuff", "coder")
+        assert len(result.subtasks) == 1
+        assert result.subtasks[0].description == "build stuff"
+
+    def test_single_work_plus_verify_collapsed(self):
+        """One work task + verification → single agent."""
+        dag = TaskDAG(goal="do thing", subtasks=[
+            SubTask(id="t1", description="implement feature", expert="coder"),
+            SubTask(id="t2", description="run all tests", expert="coder", depends_on=["t1"]),
+        ])
+        result = Orchestrator._consolidate_dag(dag, "do thing", "coder")
+        assert len(result.subtasks) == 1
+
+    def test_code_test_split_collapsed(self):
+        """Over-split DAG (code + tests per module as separate tasks) with only 1 parallel root collapses."""
+        dag = TaskDAG(goal="build module", subtasks=[
+            SubTask(id="t1", description="write code", expert="coder"),
+            SubTask(id="t2", description="write tests", expert="qa", depends_on=["t1"]),
+            SubTask(id="t3", description="verify all", expert="coder", depends_on=["t2"]),
+        ])
+        result = Orchestrator._consolidate_dag(dag, "build module", "coder")
+        assert len(result.subtasks) == 1
+
+    def test_three_parallel_modules_kept(self):
+        """Three parallel modules + verification → kept parallel."""
+        dag = TaskDAG(goal="build modules", subtasks=[
+            SubTask(id="t1", description="module A with tests", expert="coder"),
+            SubTask(id="t2", description="module B with tests", expert="coder"),
+            SubTask(id="t3", description="module C with tests", expert="coder"),
+            SubTask(id="t4", description="final verification", expert="coder", depends_on=["t1", "t2", "t3"]),
+        ])
+        result = Orchestrator._consolidate_dag(dag, "build modules", "coder")
+        assert len(result.subtasks) == 4
 
 
 # ---------------------------------------------------------------------------

@@ -347,10 +347,11 @@ For each sub-task specify:
 Output JSON: {{"subtasks": [...]}}
 
 RULES:
-- Maximize parallelism: sub-tasks that don't share files or depend on each other's output should have empty depends_on so they run simultaneously
-- Only add a dependency when a sub-task truly needs another's deliverable
-- Each sub-task should be independently verifiable
-- Include a final verification sub-task that depends on all others and runs tests
+- Each sub-task must be a COMPLETE deliverable: one agent implements AND tests its own module — NEVER split code and tests into separate sub-tasks
+- Prefer fewer, larger sub-tasks — only split work that produces genuinely independent deliverables (separate files, no shared state)
+- Maximize parallelism: independent deliverables should have empty depends_on so they run simultaneously
+- Only add a dependency when a sub-task truly needs another's output
+- Include a final verification sub-task that depends on all others and runs all tests together
 - Task: {task}"""
 
     # Model fallback chain for decomposition
@@ -433,6 +434,40 @@ RULES:
         return (len(issues) == 0, "; ".join(issues))
 
     @staticmethod
+    def _consolidate_dag(dag: TaskDAG, task: str, expert: str) -> TaskDAG:
+        """Collapse DAGs where parallelism doesn't help.
+
+        If the decomposition only has 0-1 truly parallel work tasks
+        (excluding verification/final tasks), single-agent is better.
+        """
+        def _is_verify(st: SubTask) -> bool:
+            d = st.description.lower()
+            return any(k in d for k in (
+                "verify", "verification", "run all tests",
+                "run tests", "final check", "validate all",
+            ))
+
+        work_tasks = [t for t in dag.subtasks if not _is_verify(t)]
+        # Root tasks = work tasks with no dependencies on other work tasks
+        work_ids = {t.id for t in work_tasks}
+        parallel_roots = sum(
+            1 for t in work_tasks
+            if not any(dep in work_ids for dep in (t.depends_on or []))
+        )
+
+        if parallel_roots <= 1:
+            notify(
+                f"Orchestrator: consolidating {len(dag.subtasks)} subtasks "
+                f"→ single agent (only {parallel_roots} parallel root)"
+            )
+            return TaskDAG(goal=task, subtasks=[
+                SubTask(id="t1", description=task, expert=expert)
+            ])
+
+        notify(f"Orchestrator: keeping {len(dag.subtasks)} subtasks ({parallel_roots} parallel)")
+        return dag
+
+    @staticmethod
     def _is_git_repo() -> bool:
         """Check if the project directory is a git repository."""
         return (shared.PROJECT_DIR / ".git").exists()
@@ -451,11 +486,13 @@ RULES:
 
         experts = list_experts()
 
+        best_expert = experts[0] if experts else "assistant"
+
         if TaskComplexity.should_decompose(task):
             dag = await Orchestrator.decompose(task, experts)
+            dag = Orchestrator._consolidate_dag(dag, task, best_expert)
         else:
             notify("Orchestrator: fast-path — single-agent execution (no decomposition needed)")
-            best_expert = experts[0] if experts else "assistant"
             dag = TaskDAG(goal=task, subtasks=[
                 SubTask(id="t1", description=task, expert=best_expert)
             ])
