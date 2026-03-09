@@ -112,6 +112,7 @@ class RunMetrics:
     checks_passed: int = 0
     checks_total: int = 0
     check_details: list[dict] = field(default_factory=list)
+    planning_time: float = 0.0   # Orchestrator decomposition time (swarm only)
     error: str = ""
 
 
@@ -1432,6 +1433,7 @@ async def _run_swarm(task: DeepEvalTask, workspace: Path) -> RunMetrics:
     t0 = time.monotonic()
     tokens_before = shared.state.global_tokens_used
     cost_before = shared.state.global_cost_usd
+    shared._last_planning_time = 0.0
     error = ""
 
     try:
@@ -1440,6 +1442,7 @@ async def _run_swarm(task: DeepEvalTask, workspace: Path) -> RunMetrics:
         error = str(e)
     finally:
         elapsed = round(time.monotonic() - t0, 2)
+        planning_time = shared._last_planning_time
         tokens = shared.state.global_tokens_used - tokens_before
         cost = round(shared.state.global_cost_usd - cost_before, 6)
 
@@ -1469,6 +1472,7 @@ async def _run_swarm(task: DeepEvalTask, workspace: Path) -> RunMetrics:
     # Run weighted checks
     metrics = _run_weighted_checks(task.checks, workspace)
     metrics.time_seconds = elapsed
+    metrics.planning_time = planning_time
     metrics.cost_usd = cost
     metrics.tokens_used = tokens
     metrics.error = error
@@ -1696,8 +1700,9 @@ def format_deep_report(results: list[ComparativeResult]) -> str:
 
     # Header
     lines.append(f"{'Task':<8} {'Single':>8} {'Swarm':>8} {'Delta':>8} "
-                 f"{'S.Time':>7} {'W.Time':>7} {'Speedup':>8} {'CostRat':>8} {'Verdict':<14}")
-    lines.append("-" * 100)
+                 f"{'S.Time':>7} {'W.Total':>7} {'W.Plan':>7} {'W.Exec':>7} "
+                 f"{'Speedup':>8} {'ExecSpd':>8} {'CostRat':>8} {'Verdict':<14}")
+    lines.append("-" * 120)
 
     swarm_wins = single_wins = ties = 0
     total_delta = 0.0
@@ -1710,12 +1715,26 @@ def format_deep_report(results: list[ComparativeResult]) -> str:
         delta_str = f"{r.quality_delta:+.2f}" if r.swarm.checks_total > 0 else "N/A"
         s_time = f"{r.single.time_seconds:.1f}s"
         w_time = f"{r.swarm.time_seconds:.1f}s" if r.swarm.checks_total > 0 else "N/A"
+
+        # Plan/exec breakdown
+        plan_t = r.swarm.planning_time
+        exec_t = max(0, r.swarm.time_seconds - plan_t) if r.swarm.checks_total > 0 else 0
+        w_plan = f"{plan_t:.1f}s" if r.swarm.checks_total > 0 else "N/A"
+        w_exec = f"{exec_t:.1f}s" if r.swarm.checks_total > 0 else "N/A"
+
         speedup_str = f"{r.speedup:.2f}x" if r.swarm.checks_total > 0 else "N/A"
+        # Exec-only speedup: single time / swarm exec time
+        if r.swarm.checks_total > 0 and exec_t > 0:
+            exec_speedup = r.single.time_seconds / exec_t
+            exec_spd_str = f"{exec_speedup:.2f}x"
+        else:
+            exec_spd_str = "N/A"
         cost_str = f"{r.cost_ratio:.2f}x" if r.swarm.checks_total > 0 else "N/A"
 
         verdict_display = r.verdict.replace("_", " ").title()
         lines.append(f"{r.task_id:<8} {single_str:>8} {swarm_str:>8} {delta_str:>8} "
-                     f"{s_time:>7} {w_time:>7} {speedup_str:>8} {cost_str:>8} {verdict_display:<14}")
+                     f"{s_time:>7} {w_time:>7} {w_plan:>7} {w_exec:>7} "
+                     f"{speedup_str:>8} {exec_spd_str:>8} {cost_str:>8} {verdict_display:<14}")
 
         if r.verdict == "swarm_better":
             swarm_wins += 1
@@ -1728,7 +1747,7 @@ def format_deep_report(results: list[ComparativeResult]) -> str:
         total_speedup += r.speedup
         count += 1
 
-    lines.append("-" * 100)
+    lines.append("-" * 120)
 
     # Efficiency scores table
     lines.append("")

@@ -489,6 +489,7 @@ RULES:
 
         best_expert = experts[0] if experts else "assistant"
 
+        _plan_t0 = time.monotonic()
         if TaskComplexity.should_decompose(task):
             dag = await Orchestrator.decompose(task, experts)
             # Dualhead deliberation: have external reviewer validate the plan
@@ -502,6 +503,7 @@ RULES:
             dag = TaskDAG(goal=task, subtasks=[
                 SubTask(id="t1", description=task, expert=best_expert)
             ])
+        shared._last_planning_time = round(time.monotonic() - _plan_t0, 2)
 
         notify(f"Orchestrator: decomposed into {len(dag.subtasks)} sub-tasks")
         bus.post("orchestrator", json.dumps([asdict(t) for t in dag.subtasks]), kind="plan")
