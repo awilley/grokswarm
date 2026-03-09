@@ -356,7 +356,7 @@ def _build_completion_report(display_name: str, tool_actions: list[str], rounds_
         try:
             diff_result = subprocess.run(
                 ["git", "diff", "--stat"], capture_output=True, text=True,
-                cwd=shared.PROJECT_DIR, timeout=5,
+                cwd=shared.get_project_dir(), timeout=5,
             )
             if diff_result.returncode == 0 and diff_result.stdout.strip():
                 lines.append(f"\nGit diff stat:\n{diff_result.stdout.strip()}")
@@ -407,7 +407,8 @@ def _validate_expert_yaml(data: dict, filepath: str) -> str | None:
     return None
 
 
-async def run_expert(name: str, task_desc: str, bus: SwarmBus | None = None, agent_name: str | None = None):
+async def run_expert(name: str, task_desc: str, bus: SwarmBus | None = None,
+                     agent_name: str | None = None, workspace_dir: Path | None = None):
     expert_file = shared.EXPERTS_DIR / f"{name.lower()}.yaml"
     if not expert_file.exists():
         shared.console.print(f"[red]Expert {name} not found.[/red]")
@@ -420,9 +421,16 @@ async def run_expert(name: str, task_desc: str, bus: SwarmBus | None = None, age
     expert_temperature = data.get("temperature")
     max_rounds = data.get("max_rounds", EXPERT_DEFAULT_MAX_ROUNDS)
     display_name = agent_name or name
-    shared.console.print(f"[bold cyan]-> Running Expert:[/bold cyan] {data['name']} ({display_name}) -- {data['mindset']}")
+
+    # Set workspace override for branch-isolated agents
+    if workspace_dir:
+        shared._workspace_override.set(workspace_dir)
+        shared.console.print(f"[bold cyan]-> Running Expert:[/bold cyan] {data['name']} ({display_name}) in worktree {workspace_dir.name} -- {data['mindset']}")
+    else:
+        shared.console.print(f"[bold cyan]-> Running Expert:[/bold cyan] {data['name']} ({display_name}) -- {data['mindset']}")
 
     agent = shared.state.register_agent(display_name, data['name'], task_desc)
+    agent.workspace = workspace_dir
 
     if not agent.check_budget():
         agent.transition(AgentState.PAUSED)

@@ -27,12 +27,16 @@ def _check_ssrf(url: str) -> str | None:
 _last_response_ids: dict[str, str] = {}
 
 
-def _xai_search(query: str, tool_type: str, continue_conversation: bool = False) -> str:
+def _xai_search(query: str, tool_type: str, tool_config: dict | None = None,
+                continue_conversation: bool = False) -> str:
     try:
+        tool_entry: dict = {"type": tool_type}
+        if tool_config:
+            tool_entry.update(tool_config)
         payload = {
             "model": shared.MODEL,
             "input": query,
-            "tools": [{"type": tool_type}],
+            "tools": [tool_entry],
         }
         if continue_conversation and tool_type in _last_response_ids:
             payload["previous_response_id"] = _last_response_ids[tool_type]
@@ -70,15 +74,32 @@ def _xai_search(query: str, tool_type: str, continue_conversation: bool = False)
         return f"Error: search failed: {e}"
 
 
-def web_search(query: str, domains: list[str] | None = None) -> str:
+def web_search(query: str, domains: list[str] | None = None,
+               excluded_domains: list[str] | None = None) -> str:
+    config: dict | None = None
     if domains:
-        site_prefix = " ".join(f"site:{d}" for d in domains)
-        query = f"{site_prefix} {query}"
-    return _xai_search(query, "web_search")
+        config = {"filters": {"allowed_domains": domains[:5]}}
+    elif excluded_domains:
+        config = {"filters": {"excluded_domains": excluded_domains[:5]}}
+    return _xai_search(query, "web_search", tool_config=config)
 
 
-def x_search(query: str) -> str:
-    return _xai_search(query, "x_search")
+def x_search(query: str, handles: list[str] | None = None,
+             excluded_handles: list[str] | None = None,
+             from_date: str | None = None, to_date: str | None = None) -> str:
+    config: dict | None = None
+    extras: dict = {}
+    if handles:
+        extras["allowed_x_handles"] = handles[:10]
+    elif excluded_handles:
+        extras["excluded_x_handles"] = excluded_handles[:10]
+    if from_date:
+        extras["from_date"] = from_date
+    if to_date:
+        extras["to_date"] = to_date
+    if extras:
+        config = extras
+    return _xai_search(query, "x_search", tool_config=config)
 
 
 def code_execution(code: str, language: str = "python") -> str:

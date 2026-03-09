@@ -24,15 +24,15 @@ MAX_TEST_FIX_ATTEMPTS = 3
 def _detect_test_framework() -> str | None:
     for name, info in TEST_COMMANDS.items():
         for detect_file in info["detect"]:
-            if (shared.PROJECT_DIR / detect_file).exists():
+            if (shared.get_project_dir() / detect_file).exists():
                 return name
-    test_files = [p for p, _ in _iter_project_files(shared.PROJECT_DIR, extensions={".py"}, max_files=200)
+    test_files = [p for p, _ in _iter_project_files(shared.get_project_dir(), extensions={".py"}, max_files=200)
                   if p.name.startswith("test_") or p.name.endswith("_test.py")]
     if test_files:
         return "pytest"
-    if (shared.PROJECT_DIR / "package.json").exists():
+    if (shared.get_project_dir() / "package.json").exists():
         try:
-            pkg = json.loads((shared.PROJECT_DIR / "package.json").read_text())
+            pkg = json.loads((shared.get_project_dir() / "package.json").read_text())
             if "jest" in pkg.get("devDependencies", {}) or "jest" in pkg.get("dependencies", {}):
                 return "jest"
         except Exception:
@@ -44,7 +44,7 @@ def _run_tests_raw(command: str, timeout: int = 120) -> str:
     try:
         result = subprocess.run(
             command, shell=True, capture_output=True, text=True,
-            cwd=shared.PROJECT_DIR, timeout=timeout
+            cwd=shared.get_project_dir(), timeout=timeout
         )
         output = f"Exit code: {result.returncode}\n"
         if result.stdout:
@@ -87,7 +87,7 @@ def run_app_capture(command: str, timeout: int = 10, stdin_text: str | None = No
         proc = subprocess.Popen(
             command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             stdin=subprocess.PIPE if stdin_text else subprocess.DEVNULL,
-            cwd=shared.PROJECT_DIR, text=True,
+            cwd=shared.get_project_dir(), text=True,
         )
         try:
             stdout, stderr = proc.communicate(
@@ -128,7 +128,7 @@ def capture_tui_screenshot(command: str, save_path: str = "tui_screenshot.svg",
 
     driver_script = f'''
 import asyncio, sys, importlib.util, os
-os.chdir({str(shared.PROJECT_DIR)!r})
+os.chdir({str(shared.get_project_dir())!r})
 
 module_path = {command!r}
 if module_path.endswith(".py"):
@@ -162,7 +162,7 @@ print("SCREENSHOT_SAVED:" + {str(full_path)!r})
 '''
     preflight_script = f'''
 import sys, importlib.util, os
-os.chdir({str(shared.PROJECT_DIR)!r})
+os.chdir({str(shared.get_project_dir())!r})
 module_path = {command!r}
 try:
     if module_path.endswith(".py"):
@@ -180,7 +180,7 @@ except Exception as e:
     try:
         preflight = subprocess.run(
             [sys.executable, "-c", preflight_script],
-            capture_output=True, text=True, cwd=shared.PROJECT_DIR, timeout=10
+            capture_output=True, text=True, cwd=shared.get_project_dir(), timeout=10
         )
         if preflight.returncode != 0:
             diag = (preflight.stdout + preflight.stderr).strip()
@@ -200,7 +200,7 @@ except Exception as e:
     try:
         result = subprocess.run(
             [sys.executable, "-c", driver_script],
-            capture_output=True, text=True, cwd=shared.PROJECT_DIR, timeout=timeout
+            capture_output=True, text=True, cwd=shared.get_project_dir(), timeout=timeout
         )
         output = (result.stdout + result.stderr).strip()
         if result.returncode == 0 and full_path.exists():
@@ -240,7 +240,7 @@ def _lint_file(path: Path) -> str | None:
         else:
             result = subprocess.run(
                 base_cmd + [str(path)],
-                capture_output=True, text=True, cwd=shared.PROJECT_DIR, timeout=15
+                capture_output=True, text=True, cwd=shared.get_project_dir(), timeout=15
             )
             if result.returncode != 0:
                 err = (result.stderr or result.stdout).strip()

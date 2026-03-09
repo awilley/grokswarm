@@ -15,7 +15,7 @@ WORKTREE_DIR = ".grokswarm/worktrees"
 
 
 def _run_git(*args: str, cwd: str | Path | None = None) -> str:
-    work_dir = str(cwd) if cwd else str(shared.PROJECT_DIR)
+    work_dir = str(cwd) if cwd else str(shared.get_project_dir())
     try:
         result = subprocess.run(
             ["git"] + list(args),
@@ -143,7 +143,7 @@ def git_stash(action: str = "list", message: str | None = None) -> str:
 
 
 def git_init() -> str:
-    git_dir = shared.PROJECT_DIR / ".git"
+    git_dir = shared.get_project_dir() / ".git"
     if git_dir.exists():
         return "Already a git repository."
     shared.console.print("[bold yellow]About to INIT git repo[/bold yellow]")

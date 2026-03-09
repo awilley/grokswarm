@@ -73,9 +73,10 @@ def _approval_prompt(command: str, is_dangerous: bool = False) -> str:
 
 
 def run_shell(command: str):
+    work_dir = shared.get_project_dir()
     if shared.state.agent_mode == 0 and shared.state.verbose_mode:
         shared.console.print(f"[bold yellow]About to EXECUTE:[/bold yellow] {command}")
-        shared.console.print(f"[dim]Working directory: {shared.PROJECT_DIR}[/dim]")
+        shared.console.print(f"[dim]Working directory: {work_dir}[/dim]")
     is_dangerous = _is_dangerous_command(command)
 
     if is_dangerous:
@@ -96,7 +97,7 @@ def run_shell(command: str):
             elif choice == "trust":
                 break
     try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, cwd=shared.PROJECT_DIR, timeout=120)
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, cwd=work_dir, timeout=120)
         return f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
     except Exception as e:
         return f"Error: {e}"

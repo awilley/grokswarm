@@ -154,14 +154,14 @@ def edit_file(path: str, old_text: str = "", new_text: str = "", edits: list | N
 
 def search_files(query: str):
     results = []
-    for p, rel in _iter_project_files(shared.PROJECT_DIR):
+    for p, rel in _iter_project_files(shared.get_project_dir()):
         if query.lower() in p.name.lower():
             results.append(f"  {rel}")
-    for dirpath, dirnames, _ in os.walk(shared.PROJECT_DIR):
+    for dirpath, dirnames, _ in os.walk(shared.get_project_dir()):
         dirnames[:] = [d for d in dirnames if not _should_ignore(d) and not d.startswith(".")]
         dp = Path(dirpath)
-        if query.lower() in dp.name.lower() and dp != shared.PROJECT_DIR:
-            results.append(f"  {dp.relative_to(shared.PROJECT_DIR)}/")
+        if query.lower() in dp.name.lower() and dp != shared.get_project_dir():
+            results.append(f"  {dp.relative_to(shared.get_project_dir())}/")
     return "\n".join(results) if results else "No matches found."
 
 
@@ -180,7 +180,7 @@ def grep_files(pattern: str, path: str = ".", is_regex: bool = False, context_li
             if not is_regex:
                 rg_args.append("--fixed-strings")
             rg_args += ["--", pattern, str(search_root)]
-            rg = subprocess.run(rg_args, capture_output=True, text=True, cwd=shared.PROJECT_DIR, timeout=15)
+            rg = subprocess.run(rg_args, capture_output=True, text=True, cwd=shared.get_project_dir(), timeout=15)
             if rg.returncode in (0, 1):
                 rg_out = rg.stdout.strip()
                 return rg_out if rg_out else "No matches found."
@@ -198,7 +198,7 @@ def grep_files(pattern: str, path: str = ".", is_regex: bool = False, context_li
     if search_root.is_dir():
         targets = _iter_project_files(search_root, max_files=2000)
     else:
-        targets = [(search_root, search_root.relative_to(shared.PROJECT_DIR))]
+        targets = [(search_root, search_root.relative_to(shared.get_project_dir()))]
     for p, rel in targets:
         if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff", ".woff2",
                                   ".ttf", ".eot", ".zip", ".tar", ".gz", ".exe", ".dll",

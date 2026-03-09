@@ -414,7 +414,7 @@ RULES:
         issues = []
         for deliverable in subtask.deliverables:
             if deliverable.endswith((".py", ".js", ".ts", ".jsx", ".tsx")):
-                full_path = shared.PROJECT_DIR / deliverable
+                full_path = shared.get_project_dir() / deliverable
                 if not full_path.exists():
                     issues.append(f"Expected file '{deliverable}' not created")
                 else:

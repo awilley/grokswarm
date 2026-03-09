@@ -39,21 +39,23 @@ async def analyze_image(path: str, question: str = "Describe this image in detai
         return f"Vision error: {e}"
 
 
-async def generate_image(prompt: str, n: int = 1, size: str = "1024x1024") -> str:
-    """Generate images via the xAI images/generations API."""
+async def generate_image(prompt: str, n: int = 1, aspect_ratio: str = "1:1") -> str:
+    """Generate images via the xAI images/generations API (grok-imagine-image)."""
     try:
+        payload: dict = {
+            "model": "grok-imagine-image",
+            "prompt": prompt,
+            "n": min(n, 10),
+        }
+        if aspect_ratio and aspect_ratio != "1:1":
+            payload["aspect_ratio"] = aspect_ratio
         resp = httpx.post(
             f"{shared.BASE_URL.replace('/v1', '')}/v1/images/generations",
             headers={
                 "Authorization": f"Bearer {shared.XAI_API_KEY}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": "grok-2-image",
-                "prompt": prompt,
-                "n": min(n, 4),
-                "size": size,
-            },
+            json=payload,
             timeout=120.0,
         )
         resp.raise_for_status()
@@ -69,23 +71,35 @@ async def generate_image(prompt: str, n: int = 1, size: str = "1024x1024") -> st
 
 
 async def edit_image(image_path: str, prompt: str) -> str:
-    """Edit an image via the xAI images/edits API."""
+    """Edit an image via the xAI images/edits API (grok-imagine-image, JSON)."""
     full_path = _safe_path(image_path)
     if not full_path:
         return "Access denied: outside project directory."
     if not full_path.exists() or not full_path.is_file():
         return f"File not found: {image_path}"
     try:
-        with open(full_path, "rb") as f:
-            resp = httpx.post(
-                f"{shared.BASE_URL.replace('/v1', '')}/v1/images/edits",
-                headers={
-                    "Authorization": f"Bearer {shared.XAI_API_KEY}",
-                },
-                files={"image": (full_path.name, f, "image/png")},
-                data={"prompt": prompt, "model": "grok-2-image", "n": "1"},
-                timeout=120.0,
-            )
+        img_data = full_path.read_bytes()
+        if len(img_data) > 20 * 1024 * 1024:
+            return "Error: image too large (max 20 MB)."
+        ext = full_path.suffix.lower()
+        mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                    ".gif": "image/gif", ".webp": "image/webp"}
+        mime = mime_map.get(ext, "image/png")
+        b64 = base64.b64encode(img_data).decode("ascii")
+        data_uri = f"data:{mime};base64,{b64}"
+        resp = httpx.post(
+            f"{shared.BASE_URL.replace('/v1', '')}/v1/images/edits",
+            headers={
+                "Authorization": f"Bearer {shared.XAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "grok-imagine-image",
+                "prompt": prompt,
+                "image": {"url": data_uri, "type": "image_url"},
+            },
+            timeout=120.0,
+        )
         resp.raise_for_status()
         data = resp.json()
         urls = [item.get("url", "") for item in data.get("data", []) if item.get("url")]

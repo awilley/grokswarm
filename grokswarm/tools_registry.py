@@ -451,7 +451,8 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "The search query."},
-                    "domains": {"type": "array", "items": {"type": "string"}, "description": "Optional: limit results to these domains (e.g. ['python.org', 'docs.python.org'])."}
+                    "domains": {"type": "array", "items": {"type": "string"}, "description": "Optional: only search within these domains (max 5, e.g. ['python.org'])."},
+                    "excluded_domains": {"type": "array", "items": {"type": "string"}, "description": "Optional: exclude these domains from results (max 5)."}
                 },
                 "required": ["query"]
             }
@@ -461,11 +462,15 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "x_search",
-            "description": "Search X (Twitter) posts in real-time using xAI server-side search. Returns summarized posts with links. Use for opinions, trending topics, social media sentiment, real-time reactions.",
+            "description": "Search X (Twitter) posts in real-time using xAI server-side search. Returns summarized posts with links. Use for opinions, trending topics, social media sentiment, real-time reactions. Supports filtering by handle and date range.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The search query."}
+                    "query": {"type": "string", "description": "The search query."},
+                    "handles": {"type": "array", "items": {"type": "string"}, "description": "Optional: only include posts from these X handles (max 10, e.g. ['elonmusk'])."},
+                    "excluded_handles": {"type": "array", "items": {"type": "string"}, "description": "Optional: exclude posts from these X handles (max 10)."},
+                    "from_date": {"type": "string", "description": "Optional: start date in ISO format YYYY-MM-DD."},
+                    "to_date": {"type": "string", "description": "Optional: end date in ISO format YYYY-MM-DD."}
                 },
                 "required": ["query"]
             }
@@ -506,13 +511,13 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "generate_image",
-            "description": "Generate images from a text prompt using xAI's image generation model (grok-2-image). Returns URLs of generated images.",
+            "description": "Generate images from a text prompt using xAI's grok-imagine-image model. Returns URLs of generated images. Supports aspect ratio control.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "prompt": {"type": "string", "description": "Text description of the image to generate."},
-                    "n": {"type": "integer", "description": "Number of images to generate (1-4). Default: 1."},
-                    "size": {"type": "string", "description": "Image size. Default: 1024x1024.", "enum": ["1024x1024", "1024x768", "768x1024"]}
+                    "n": {"type": "integer", "description": "Number of images to generate (1-10). Default: 1."},
+                    "aspect_ratio": {"type": "string", "description": "Aspect ratio. Default: 1:1.", "enum": ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "auto"]}
                 },
                 "required": ["prompt"]
             }
@@ -692,11 +697,11 @@ TOOL_DISPATCH = {
     "extract_links": lambda args: extract_links(args["url"]),
     "find_symbol": lambda args: find_symbol(args["name"]),
     "find_references": lambda args: find_references(args["name"]),
-    "web_search": lambda args: web_search(args["query"], args.get("domains")),
-    "x_search": lambda args: x_search(args["query"]),
+    "web_search": lambda args: web_search(args["query"], args.get("domains"), args.get("excluded_domains")),
+    "x_search": lambda args: x_search(args["query"], args.get("handles"), args.get("excluded_handles"), args.get("from_date"), args.get("to_date")),
     "code_execution": lambda args: code_execution(args["code"], args.get("language", "python")),
     "analyze_image": lambda args: analyze_image(args["path"], args.get("question", "Describe this image in detail."), args.get("detail", "auto")),
-    "generate_image": lambda args: generate_image(args["prompt"], args.get("n", 1), args.get("size", "1024x1024")),
+    "generate_image": lambda args: generate_image(args["prompt"], args.get("n", 1), args.get("aspect_ratio", "1:1")),
     "edit_image": lambda args: edit_image(args["image_path"], args["prompt"]),
     "report_bug": lambda args: report_bug_impl(args["title"], args["description"], args.get("severity", "medium"), args.get("scope", "project")),
     "list_bugs": lambda args: list_bugs_impl(args.get("scope", "project"), args.get("status", "open")),
