@@ -430,10 +430,21 @@ RULES:
         return (len(issues) == 0, "; ".join(issues))
 
     @staticmethod
-    async def run(task: str, bus):
-        """Main orchestration loop."""
+    def _is_git_repo() -> bool:
+        """Check if the project directory is a git repository."""
+        return (shared.PROJECT_DIR / ".git").exists()
+
+    @staticmethod
+    async def run(task: str, bus, *, use_worktrees: bool = True):
+        """Main orchestration loop with per-agent branch isolation.
+
+        When use_worktrees=True and the project is a git repo, each parallel
+        agent batch gets its own git worktree (branch). After agents complete,
+        their branches are merged back into the main branch.
+        """
         from grokswarm.agents import run_expert
         from grokswarm.registry_helpers import list_experts
+        from grokswarm.tools_git import git_worktree_add, git_worktree_remove, _run_git
 
         experts = list_experts()
         dag = await Orchestrator.decompose(task, experts)
@@ -444,24 +455,33 @@ RULES:
         # Store the DAG on shared state so /tasks can display it
         shared._current_dag = dag
 
+        is_git = Orchestrator._is_git_repo()
+        enable_worktrees = use_worktrees and is_git
+
+        # Track branches created for merging
+        agent_branches: list[tuple[SubTask, str]] = []  # (subtask, branch_name)
+
         while not dag.is_complete():
             ready = dag.ready_tasks()
             if not ready and dag.failed_tasks():
-                # All remaining tasks are blocked by failures
                 failed_info = "; ".join(f"{t.id}: {t.result_summary}" for t in dag.failed_tasks())
                 notify(f"Orchestrator: blocked by failures -- {failed_info}", level="warning")
                 break
 
             if not ready:
-                # Nothing ready and nothing failed -- shouldn't happen, but guard
                 break
+
+            # Determine if we need worktrees: only when >1 task in a batch
+            batch_worktrees = enable_worktrees and len(ready) > 1
 
             # Launch ready tasks as agents
             tasks = []
+            batch_branches = []
             for subtask in ready:
                 subtask.status = "running"
                 agent_name = f"{subtask.expert}_{subtask.id}"
                 subtask.agent_name = agent_name
+
                 # Prepend results from dependency tasks so agent has context
                 dep_context = ""
                 for dep_id in (subtask.depends_on or []):
@@ -469,11 +489,24 @@ RULES:
                     if dep_task and getattr(dep_task, 'result_summary', None):
                         dep_context += f"\n[Prior result from {dep_id}]: {dep_task.result_summary}\n"
                 full_desc = dep_context + subtask.description if dep_context else subtask.description
+
+                workspace = None
+                if batch_worktrees:
+                    branch_name = f"agent/{agent_name}"
+                    worktree_result = git_worktree_add(branch_name)
+                    if not worktree_result.startswith("Error"):
+                        workspace = Path(worktree_result)
+                        batch_branches.append((subtask, branch_name))
+                        notify(f"Orchestrator: [{subtask.id}] worktree created: {branch_name}")
+                    else:
+                        notify(f"Orchestrator: [{subtask.id}] worktree failed ({worktree_result}), running in shared workspace", level="warning")
+
                 task_coro = run_expert(
                     subtask.expert,
                     full_desc,
                     agent_name=agent_name,
-                    bus=bus
+                    bus=bus,
+                    workspace_dir=workspace,
                 )
                 tasks.append((subtask, asyncio.create_task(task_coro)))
 
@@ -496,14 +529,56 @@ RULES:
                     subtask.status = "failed"
                     subtask.result_summary = "Agent error"
                 else:
-                    # Treat unknown states as failed
                     subtask.status = "failed"
                     subtask.result_summary = f"Agent state: {agent.state.value if agent else 'unknown'}"
+
+            # Merge successful agent branches back into main
+            if batch_branches:
+                # Commit any uncommitted work in each worktree before merging
+                for subtask, branch_name in batch_branches:
+                    if subtask.status != "done":
+                        continue
+                    wt_path = shared.PROJECT_DIR / ".grokswarm" / "worktrees" / branch_name
+                    if wt_path.exists():
+                        _run_git("add", "-A", cwd=wt_path)
+                        _run_git("commit", "-m",
+                                 f"agent/{subtask.agent_name}: {subtask.description[:60]}",
+                                 cwd=wt_path)
+
+                # Merge each successful branch into current branch
+                for subtask, branch_name in batch_branches:
+                    if subtask.status != "done":
+                        notify(f"Orchestrator: skipping merge of failed branch {branch_name}", level="warning")
+                    else:
+                        merge_result = _run_git("merge", "--no-ff", "-m",
+                                                f"Merge agent/{subtask.agent_name}: {subtask.description[:60]}",
+                                                branch_name)
+                        if "CONFLICT" in merge_result or merge_result.startswith("Error"):
+                            notify(f"Orchestrator: MERGE CONFLICT on {branch_name}: {merge_result[:200]}", level="error")
+                            # Abort the merge and mark as failed
+                            _run_git("merge", "--abort")
+                            subtask.status = "failed"
+                            subtask.result_summary = f"Merge conflict: {merge_result[:200]}"
+                        else:
+                            notify(f"Orchestrator: merged {branch_name} successfully")
+
+                # Cleanup worktrees
+                for subtask, branch_name in batch_branches:
+                    try:
+                        git_worktree_remove(branch_name, force=True)
+                    except Exception:
+                        pass
+
+                agent_branches.extend(batch_branches)
 
         # Final summary
         done_count = sum(1 for t in dag.subtasks if t.status == "done")
         total = len(dag.subtasks)
-        notify(f"Orchestrator: {done_count}/{total} sub-tasks complete")
+        merged_count = sum(1 for st, _ in agent_branches if st.status == "done")
+        if agent_branches:
+            notify(f"Orchestrator: {done_count}/{total} sub-tasks complete, {merged_count} branches merged")
+        else:
+            notify(f"Orchestrator: {done_count}/{total} sub-tasks complete")
 
 
 # ---------------------------------------------------------------------------

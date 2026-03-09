@@ -12,6 +12,7 @@ from grokswarm.shared import (
     XAI_API_KEY, VERSION, MODEL, BASE_URL, MAX_TOKENS, CODE_MODEL,
     MODEL_PRICING, _get_pricing,
     PROJECT_DIR, PROJECT_CONTEXT, SYSTEM_PROMPT,
+    _workspace_override, get_project_dir,
     GROKSWARM_HOME, SKILLS_DIR, EXPERTS_DIR, TEAMS_DIR, MEMORY_DIR, PLUGINS_DIR,
     SESSIONS_DIR, CONTEXT_CACHE_DIR, _RECENT_PROJECTS_FILE,
     _background_tasks, _bus_instance, _agent_counter,
@@ -66,6 +67,8 @@ from grokswarm.tools_test import (
 from grokswarm.tools_git import (
     git_status, git_diff, git_log, git_commit, git_checkout,
     git_branch, git_show_file, git_blame, git_stash, git_init,
+    git_merge, git_worktree_add, git_worktree_remove, git_worktree_list, git_merge_abort,
+    WORKTREE_DIR,
 )
 
 # -- tools_browser --
