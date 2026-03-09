@@ -65,7 +65,12 @@ _cancel_event = asyncio.Event()
 _pending_images: list[str] = []
 
 # Pending approval prompt (toolbar-based confirmation)
-# {"prompt": str, "default": bool, "future": concurrent.futures.Future, "extra_keys": dict | None}
+# {
+#   "prompt": str,                                     # Question text
+#   "choices": [{"label": str, "value": any}, ...],    # Options
+#   "selected": int,                                   # Currently highlighted index
+#   "future": concurrent.futures.Future,               # Blocks caller thread
+# }
 _pending_approval: dict | None = None
 
 
@@ -370,19 +375,27 @@ def _inline_confirm(prompt_text: str, default: bool = True) -> bool:
         # Ignore any other key (including empty from special keys)
 
 
-def _toolbar_confirm(prompt_text: str, default: bool = True, extra_keys: dict | None = None):
-    """Ask y/n via prompt_toolkit toolbar key bindings.
+def _toolbar_confirm(prompt_text: str, choices: list[dict] | None = None, default_index: int = 0):
+    """Ask via prompt_toolkit arrow-key selector.
 
-    Creates a Future, sets _pending_approval, and blocks until resolved.
-    Returns True/False for y/n, or a string for extra keys (e.g. "i", "trust").
+    Creates a Future, sets _pending_approval with choices, and blocks until resolved.
+    Returns the ``value`` of the chosen option, or False on timeout/cancel.
+
+    If *choices* is None, generates a simple Yes/No list.
     """
     global _pending_approval
+    if choices is None:
+        choices = [
+            {"label": "Yes", "value": True},
+            {"label": "No", "value": False},
+        ]
+    default_index = max(0, min(default_index, len(choices) - 1))
     future = concurrent.futures.Future()
     _pending_approval = {
         "prompt": prompt_text,
-        "default": default,
+        "choices": choices,
+        "selected": default_index,
         "future": future,
-        "extra_keys": extra_keys,
     }
     app = _toolbar_app_ref
     if app:
@@ -414,19 +427,35 @@ def _toolbar_confirm(prompt_text: str, default: bool = True, extra_keys: dict | 
 
 
 def _terminal_confirm(prompt_text: str, default: bool = True) -> bool:
-    """Ask y/n — routes to toolbar or inline depending on REPL state."""
+    """Ask y/n — routes to toolbar selector or inline depending on REPL state."""
     clean = re.sub(r'\[/?[^\]]*\]', '', prompt_text)
     app = _toolbar_app_ref
     if app and getattr(app, 'is_running', False) and not _is_prompt_suspended:
-        result = _toolbar_confirm(clean, default)
-        return bool(result)
+        result = _toolbar_confirm(clean, default_index=0 if default else 1)
+        return result is True  # only True counts as approval
     return _inline_confirm(clean, default)
 
 
 def _auto_approve(prompt: str, default: bool = True) -> bool:
-    """Auto-approve in trust mode or agent mode, otherwise prompt the user."""
+    """Auto-approve in trust mode or agent mode, otherwise prompt with trust option."""
     if state.trust_mode or state.agent_mode > 0:
         return True
+    app = _toolbar_app_ref
+    if app and getattr(app, 'is_running', False) and not _is_prompt_suspended:
+        choices = [
+            {"label": "Yes", "value": True},
+            {"label": "Yes, allow all this session", "value": "trust"},
+            {"label": "No", "value": False},
+        ]
+        result = _toolbar_confirm(
+            re.sub(r'\[/?[^\]]*\]', '', prompt),
+            choices=choices,
+            default_index=0 if default else 2,
+        )
+        if result == "trust":
+            state.trust_mode = True
+            return True
+        return result is True
     return _terminal_confirm(prompt, default)
 
 

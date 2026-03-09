@@ -803,20 +803,41 @@ async def _chat_async(session_name: str | None = None):
             shared._toolbar_status_expires = _time.monotonic() + 2.0
             event.app.invalidate()
 
-    # -- Approval key bindings (active only when _pending_approval is set) --
+    # -- Approval key bindings: arrow-key selector --
     _approval_active = Condition(lambda: shared._pending_approval is not None)
 
-    @kb.add('y', filter=_approval_active, eager=True)
-    def _approval_yes(event):
+    def _approval_move(delta: int, event):
         ap = shared._pending_approval
-        if ap and not ap["future"].done():
-            ap["future"].set_result(True)
+        if not ap:
+            return
+        n = len(ap["choices"])
+        ap["selected"] = (ap["selected"] + delta) % n
+        event.app.invalidate()
 
-    @kb.add('n', filter=_approval_active, eager=True)
-    def _approval_no(event):
+    def _approval_confirm(event):
         ap = shared._pending_approval
         if ap and not ap["future"].done():
-            ap["future"].set_result(False)
+            ap["future"].set_result(ap["choices"][ap["selected"]]["value"])
+
+    @kb.add('up', filter=_approval_active, eager=True)
+    def _approval_up(event):
+        _approval_move(-1, event)
+
+    @kb.add('down', filter=_approval_active, eager=True)
+    def _approval_down(event):
+        _approval_move(1, event)
+
+    @kb.add('k', filter=_approval_active, eager=True)
+    def _approval_k(event):
+        _approval_move(-1, event)
+
+    @kb.add('j', filter=_approval_active, eager=True)
+    def _approval_j(event):
+        _approval_move(1, event)
+
+    @kb.add('enter', filter=_approval_active, eager=True)
+    def _approval_enter(event):
+        _approval_confirm(event)
 
     @kb.add('escape', filter=_approval_active, eager=True)
     def _approval_esc(event):
@@ -824,33 +845,23 @@ async def _chat_async(session_name: str | None = None):
         if ap and not ap["future"].done():
             ap["future"].set_result(False)
 
-    @kb.add('enter', filter=_approval_active, eager=True)
-    def _approval_enter(event):
-        ap = shared._pending_approval
-        if ap and not ap["future"].done():
-            ap["future"].set_result(ap["default"])
-
     @kb.add('c-c', filter=_approval_active, eager=True)
     def _approval_cancel(event):
         ap = shared._pending_approval
         if ap and not ap["future"].done():
             ap["future"].cancel()
 
-    @kb.add('i', filter=_approval_active, eager=True)
-    def _approval_explain(event):
-        ap = shared._pending_approval
-        if ap and not ap["future"].done():
-            if ap.get("extra_keys") and "i" in ap["extra_keys"]:
-                ap["future"].set_result("i")
-            # else: swallow (no explain option for this prompt)
-
-    @kb.add('t', filter=_approval_active, eager=True)
-    def _approval_trust(event):
-        ap = shared._pending_approval
-        if ap and not ap["future"].done():
-            if ap.get("extra_keys") and "t" in ap["extra_keys"]:
-                ap["future"].set_result("trust")
-            # else: swallow
+    # Number keys: jump to option and confirm immediately
+    for _numkey in '123456789':
+        @kb.add(_numkey, filter=_approval_active, eager=True)
+        def _approval_number(event, _k=_numkey):
+            ap = shared._pending_approval
+            if not ap or ap["future"].done():
+                return
+            idx = int(_k) - 1
+            if 0 <= idx < len(ap["choices"]):
+                ap["selected"] = idx
+                ap["future"].set_result(ap["choices"][idx]["value"])
 
     @kb.add(Keys.Any, filter=_approval_active, eager=True)
     def _approval_swallow(event):
@@ -1129,26 +1140,23 @@ async def _chat_async(session_name: str | None = None):
                     _cols = shutil.get_terminal_size((80, 20)).columns
                     line_str = "\u2500" * _cols
 
-                    # Approval prompt replaces the normal input prompt
+                    # Approval prompt: vertical arrow-key selector
                     ap = shared._pending_approval
                     if ap is not None:
-                        prompt = ap["prompt"]
-                        default = ap.get("default", True)
-                        extra = ap.get("extra_keys")
-                        def_y = " (default)" if default else ""
-                        def_n = " (default)" if not default else ""
+                        prompt_text = ap["prompt"]
+                        choices = ap["choices"]
+                        selected = ap["selected"]
                         parts = [""]
                         parts.append(f"<style fg='#b08800'>{line_str}</style>")
-                        parts.append(f"  <ansiyellow><b>{prompt}</b></ansiyellow>")
-                        opts = (
-                            f"   <ansidarkgray> y </ansidarkgray> approve{def_y}"
-                            f"   <ansidarkgray> n </ansidarkgray> reject{def_n}"
-                            f"   <ansidarkgray> esc </ansidarkgray> cancel"
-                        )
-                        if extra:
-                            for key, label in extra.items():
-                                opts += f"   <ansidarkgray> {key} </ansidarkgray> {label}"
-                        parts.append(opts)
+                        parts.append(f"  <ansiyellow><b>{prompt_text}</b></ansiyellow>")
+                        for i, ch in enumerate(choices):
+                            num = i + 1
+                            if i == selected:
+                                parts.append(f"  <ansibrightcyan><b>&#10095; {num}. {ch['label']}</b></ansibrightcyan>")
+                            else:
+                                parts.append(f"  <ansidarkgray>  {num}. {ch['label']}</ansidarkgray>")
+                        parts.append("")
+                        parts.append("  <ansidarkgray>Esc to cancel</ansidarkgray>")
                         return HTML("\n".join(parts))
 
                     # Normal prompt

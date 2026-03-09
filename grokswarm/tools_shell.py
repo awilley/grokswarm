@@ -55,19 +55,19 @@ Be concise — 3-5 lines max. Working directory is: """ + str(shared.PROJECT_DIR
 def _approval_prompt(command: str, is_dangerous: bool = False) -> str:
     label = "Confirm dangerous command?" if is_dangerous else "Approve command?"
 
-    # Toolbar path: route through prompt_toolkit when REPL is running
+    # Toolbar path: route through prompt_toolkit arrow-key selector
     app = shared._toolbar_app_ref
     if app and getattr(app, 'is_running', False) and not shared._is_prompt_suspended:
-        result = shared._toolbar_confirm(
-            label, default=False,
-            extra_keys={"i": "explain", "t": "trust all"},
-        )
-        if result is True:
-            return "y"
-        elif result is False:
+        choices = [
+            {"label": "Yes", "value": "y"},
+            {"label": "Yes, trust all commands this session", "value": "trust"},
+            {"label": "Explain this command", "value": "i"},
+            {"label": "No", "value": "n"},
+        ]
+        result = shared._toolbar_confirm(label, choices=choices, default_index=0)
+        if result is False:
             return "n"
-        else:
-            return str(result)
+        return str(result)
 
     # Inline path: direct stdout + _read_single_key
     import sys
