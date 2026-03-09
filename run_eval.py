@@ -33,7 +33,7 @@ async def run(categories):
         print(f"Running: {task.id} -- {task.description}")
         print(f"{'='*60}", flush=True)
 
-        with tempfile.TemporaryDirectory(prefix=f"eval_{task.id}_") as tmp:
+        with tempfile.TemporaryDirectory(prefix=f"eval_{task.id}_", ignore_cleanup_errors=True) as tmp:
             workspace = Path(tmp)
             r = await run_eval_task_live(task, workspace)
             results.append(r)

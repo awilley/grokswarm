@@ -584,6 +584,15 @@ async def run_eval_task_live(task: EvalTask, workspace: Path) -> EvalResult:
         result.time_seconds = round(time.monotonic() - t0, 2)
 
     finally:
+        # Wait for any background agents to finish
+        for name, bg_task in list(shared._background_tasks.items()):
+            if not bg_task.done():
+                try:
+                    await asyncio.wait_for(bg_task, timeout=60)
+                except Exception:
+                    bg_task.cancel()
+        shared._background_tasks.clear()
+
         shared.PROJECT_DIR = old_project_dir
         bus.close()
         # Close the singleton bus if it was created pointing at workspace
@@ -593,8 +602,10 @@ async def run_eval_task_live(task: EvalTask, workspace: Path) -> EvalResult:
             except Exception:
                 pass
             shared._bus_instance = None
-        # Clean up agent
-        shared.state.agents.pop(f"eval_{task.id}", None)
+        # Clean up agents
+        agents_to_remove = [n for n in shared.state.agents if n.startswith("eval_")]
+        for n in agents_to_remove:
+            shared.state.agents.pop(n, None)
 
     # Run checks
     result.correct, result.check_details = _run_checks(task, workspace)
