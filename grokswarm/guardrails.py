@@ -159,12 +159,18 @@ Call update_plan to mark all completed steps, then provide your final summary.""
 # ---------------------------------------------------------------------------
 
 class LoopDetector:
-    """Detects when an agent is repeating the same failing pattern."""
+    """Detects when an agent is repeating the same failing pattern.
+
+    Uses content-aware detection: tracks what changed (not just what file),
+    parses pytest output specifically, and requires repeated identical content
+    to declare a loop — not just repeated tool calls.
+    """
 
     def __init__(self, threshold: int = 3):
         self.threshold = threshold
-        self.tool_history: list[tuple[str, str]] = []  # (tool_name, key_arg_hash)
+        self.tool_history: list[tuple[str, str]] = []  # (tool_name, content_hash)
         self.edit_targets: dict[str, int] = {}  # file_path -> edit_count
+        self.edit_content_sigs: dict[str, list[str]] = {}  # file_path -> [content_hashes]
         self.test_failures: list[str] = []  # list of test error signatures
 
     def record_tool_call(self, tool_name: str, args: dict, result: str):
@@ -175,6 +181,10 @@ class LoopDetector:
         if tool_name in ("edit_file", "write_file"):
             path = args.get("path", "")
             self.edit_targets[path] = self.edit_targets.get(path, 0) + 1
+            # Track content hash to distinguish "same edit repeated" from "making progress"
+            content = args.get("content", "") or args.get("new_text", "") or args.get("old_text", "")
+            content_hash = hashlib.md5(content.encode(errors="replace")).hexdigest()[:8]
+            self.edit_content_sigs.setdefault(path, []).append(content_hash)
 
         if tool_name == "run_tests" and "[FAIL]" in result:
             error_sig = self._extract_error_signature(result)
@@ -182,20 +192,27 @@ class LoopDetector:
 
     def check_loop(self) -> str | None:
         """Returns escalation message if a loop is detected, None otherwise."""
-        # Pattern 1: Same file edited many times
-        # Agents legitimately edit files 5-6 times during normal work
-        # (write, fix syntax, refactor, update tests). Threshold is 8 for
-        # exploratory edits, but drops to 5 if there are test failures
-        # (likely stuck in a fix loop).
-        edit_threshold = 5 if self.test_failures else 8
-        for path, count in self.edit_targets.items():
-            if count >= edit_threshold:
-                return (
-                    f"[LOOP DETECTED] You've edited '{path}' {count} times. "
-                    "Step back -- your current approach isn't working. "
-                    "Read the file fresh, reconsider your assumptions, "
-                    "and try a fundamentally different fix."
-                )
+        # Pattern 1: Same file edited many times WITH stagnant content
+        # Only triggers if recent edits are repetitive (same content hash),
+        # not if each edit is making new changes (forward progress).
+        for path, sigs in self.edit_content_sigs.items():
+            count = len(sigs)
+            if count >= 5 and self.test_failures:
+                # With test failures: check if last 4 edits are repetitive (<=2 unique)
+                if len(set(sigs[-4:])) <= 2:
+                    return (
+                        f"[LOOP DETECTED] You've edited '{path}' {count} times "
+                        "with similar content each time. Your approach isn't working. "
+                        "Read the file fresh, reconsider your assumptions, "
+                        "and try a fundamentally different fix."
+                    )
+            elif count >= 8:
+                # Without test failures: higher threshold, check last 5 for repetition
+                if len(set(sigs[-5:])) <= 2:
+                    return (
+                        f"[LOOP DETECTED] You've edited '{path}' {count} times "
+                        "with repetitive changes. Step back and try a different approach."
+                    )
 
         # Pattern 2: Same test error 3+ times in a row
         if len(self.test_failures) >= 3:
@@ -208,11 +225,12 @@ class LoopDetector:
                     "What assumption are you making that might be wrong?"
                 )
 
-        # Pattern 3: Same tool+args sequence repeated
-        if len(self.tool_history) >= 6:
+        # Pattern 3: Same tool+args sequence repeated 3 times (not just 2)
+        if len(self.tool_history) >= 9:
             last_3 = self.tool_history[-3:]
-            prev_3 = self.tool_history[-6:-3]
-            if last_3 == prev_3:
+            mid_3 = self.tool_history[-6:-3]
+            first_3 = self.tool_history[-9:-6]
+            if last_3 == mid_3 == first_3:
                 return (
                     "[LOOP DETECTED] You're repeating the same sequence of actions. "
                     "This pattern is not making progress. Try a completely different "
@@ -222,8 +240,13 @@ class LoopDetector:
         return None
 
     def _hash_key_args(self, tool_name: str, args: dict) -> str:
-        """Hash the key arguments that identify a unique tool invocation."""
-        if tool_name in ("edit_file", "write_file", "read_file"):
+        """Hash key arguments including content for edit/write tools."""
+        if tool_name in ("edit_file", "write_file"):
+            path = args.get("path", "")
+            content = args.get("content", "") or args.get("new_text", "")
+            content_hash = hashlib.md5(content.encode(errors="replace")).hexdigest()[:8]
+            return f"{path}:{content_hash}"
+        if tool_name == "read_file":
             return args.get("path", "")
         if tool_name == "run_tests":
             return args.get("command", "default")
@@ -232,11 +255,22 @@ class LoopDetector:
         return str(sorted(args.keys()))
 
     def _extract_error_signature(self, result: str) -> str:
-        """Extract a stable signature from a test failure for comparison."""
+        """Extract a stable signature from a test failure.
+
+        Prefers pytest short-summary FAILED lines (most specific),
+        falls back to lines containing Error/assert.
+        """
         lines = result.strip().split("\n")
+        # Prefer pytest short test summary: "FAILED test_x.py::test_name - reason"
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("FAILED ") and "::" in stripped:
+                return stripped[:150]
+        # Fallback: scan from bottom for error lines
         for line in reversed(lines):
-            if "Error" in line or "FAILED" in line or "assert" in line.lower():
-                return line.strip()[:100]
+            stripped = line.strip()
+            if "Error" in stripped or "FAILED" in stripped or "assert" in stripped.lower():
+                return stripped[:100]
         return result[-100:]
 
 
@@ -899,8 +933,13 @@ class GuardrailPipeline:
             self.agent.phase = "executing"
             shared._log(f"agent {self.display_name}: simple task, skipping planning phase")
 
-        # Inject lessons from previous sessions
-        relevant_lessons = self.lessons_db.find_relevant(files=[])
+        # Inject lessons from previous sessions — use task description
+        # and any file paths mentioned in it for relevance matching
+        task_files = list(_extract_files_from_plan([{"step": self.task_desc}]))
+        relevant_lessons = self.lessons_db.find_relevant(
+            error_signature=self.task_desc[:200],
+            files=task_files,
+        )
         if relevant_lessons:
             lesson_text = self.lessons_db.format_for_prompt(relevant_lessons)
             conversation.append({"role": "user", "content": lesson_text})
@@ -1156,7 +1195,7 @@ class GuardrailPipeline:
 
         ev_summary = self.evidence_tracker.get_evidence_summary()
 
-        # Cross-session learning
+        # Cross-session learning: record lessons from loop recovery
         if self.loop_escalation_count > 0 and ev_summary.get("last_test_status") == "PASS":
             fix_desc = full_output[-500:] if full_output else "Unknown fix"
             files_involved = list(self.loop_detector.edit_targets.keys())
@@ -1168,6 +1207,19 @@ class GuardrailPipeline:
                     expert=self.expert_data.get('name', ''),
                 )
                 shared._log(f"agent {self.display_name}: recorded lesson for '{self.loop_error_at_escalation[:50]}'")
+            except Exception:
+                pass
+
+        # Also learn from successful completions with test failures recovered
+        elif self.made_file_mutations and ev_summary.get("last_test_status") == "PASS" and len(self.loop_detector.test_failures) > 0:
+            files_involved = list(self.loop_detector.edit_targets.keys())
+            try:
+                self.lessons_db.record_lesson(
+                    error_signature=self.loop_detector.test_failures[0],
+                    fix_description=f"Task: {self.task_desc[:200]}. Fixed after {len(self.loop_detector.test_failures)} test failures.",
+                    files_involved=files_involved,
+                    expert=self.expert_data.get('name', ''),
+                )
             except Exception:
                 pass
 

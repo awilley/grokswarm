@@ -471,7 +471,7 @@ def _context_cache_key(project_dir: Path) -> Path:
 def _project_mtime(project_dir: Path) -> float:
     latest = 0.0
     try:
-        for p, _ in _iter_project_files(project_dir, max_files=2000):
+        for p, _ in _iter_project_files(project_dir, max_files=10000):
             try:
                 mt = p.stat().st_mtime
                 if mt > latest:

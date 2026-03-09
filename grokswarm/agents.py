@@ -474,6 +474,7 @@ Rules:
 - Use web_search when you genuinely need current or unknown information.
 - Work fast: create files, write code, test, done. Minimize rounds.
 - BEFORE you finish, you MUST run run_tests if you modified any code files.
+- If a subtask is clearly outside your expertise (e.g. you are a coder asked to do deep research), use spawn_agent to delegate to the right expert, then wait_for_agent to get their results before proceeding.
 
 {_planning_prompt(task_desc)}{prior_context}{project_context}"""
 
@@ -773,6 +774,37 @@ def _check_messages_impl(agent_name: str = "*", since_id: int = 0) -> str:
     return "\n".join(lines)
 
 
+async def _wait_for_agent_impl(name: str, timeout_sec: int = 300) -> str:
+    """Block until a spawned agent completes and return its output."""
+    task = shared._background_tasks.get(name)
+    if task is None:
+        # Agent might have already finished and been cleaned up
+        agent = shared.state.get_agent(name)
+        if agent is None:
+            return f"No agent named '{name}' found. Use list_agents to see available agents."
+        # Already done — read its messages
+    else:
+        try:
+            await asyncio.wait_for(task, timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            return f"Agent '{name}' did not finish within {timeout_sec}s. It is still running. Check back later with check_messages."
+        except Exception as e:
+            return f"Agent '{name}' encountered an error: {e}"
+
+    # Collect results from bus
+    bus = get_bus()
+    msgs = bus.read("*")
+    agent_msgs = [m for m in msgs if m["sender"] == name and m["kind"] in ("result", "error")]
+    if agent_msgs:
+        return "\n".join(m["body"][:2000] for m in agent_msgs[-3:])
+
+    # Fallback: check agent state
+    agent = shared.state.get_agent(name)
+    if agent:
+        return f"Agent '{name}' finished (state={agent.state.value}) but posted no result messages."
+    return f"Agent '{name}' completed."
+
+
 def _list_agents_impl() -> str:
     if not shared.state.agents:
         return "No active agents."
@@ -801,3 +833,4 @@ TOOL_DISPATCH["spawn_agent"] = lambda args: _spawn_agent_impl(
 TOOL_DISPATCH["send_message"] = lambda args: _send_message_impl("user", args["to"], args["body"], args.get("kind", "request"))
 TOOL_DISPATCH["check_messages"] = lambda args: _check_messages_impl(args.get("agent_name", "*"), args.get("since_id", 0))
 TOOL_DISPATCH["list_agents"] = lambda args: _list_agents_impl()
+TOOL_DISPATCH["wait_for_agent"] = lambda args: _wait_for_agent_impl(args["name"], args.get("timeout", 300))

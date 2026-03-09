@@ -123,7 +123,7 @@ from grokswarm.agents import (
     EXPERT_DEFAULT_MAX_ROUNDS, _auto_checkpoint_before_agent, _validate_expert_yaml,
     _detect_tech_stack, _build_completion_report,
     run_supervisor, run_expert,
-    _spawn_agent_impl, _send_message_impl, _check_messages_impl, _list_agents_impl,
+    _spawn_agent_impl, _send_message_impl, _check_messages_impl, _list_agents_impl, _wait_for_agent_impl,
 )
 
 # -- repl --

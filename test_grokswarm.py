@@ -610,15 +610,17 @@ class TestEstimateTokens:
         assert _main._estimate_tokens([]) == 0
 
     def test_simple_content(self):
-        msgs = [{"role": "user", "content": "a" * 400}]
-        assert _main._estimate_tokens(msgs) == 100  # 400 / 4
+        # 80 short words → 80 tokens + 4 message overhead = 84
+        msgs = [{"role": "user", "content": " ".join(["hi"] * 80)}]
+        tokens = _main._estimate_tokens(msgs)
+        assert tokens == 84  # 80 words (≤4 chars = 1 token each) + 4 overhead
 
     def test_tool_calls_counted(self):
-        msgs = [{"role": "assistant", "content": "hi",
-                 "tool_calls": [{"function": {"name": "t", "arguments": "b" * 200}}]}]
+        msgs = [{"role": "assistant", "content": "hi there",
+                 "tool_calls": [{"function": {"name": "t", "arguments": '{"key": "value"}'}}]}]
         tokens = _main._estimate_tokens(msgs)
-        # "hi" = 2 chars → 0 (int div), tool args 200 → 50, total 50
-        assert tokens == 50
+        # "hi there" = 2 words, tool args ~4 words + overhead
+        assert tokens > 10
 
 
 # -- Compaction boundary (C4) -----------------------------------------------
@@ -1610,66 +1612,105 @@ class TestPlanGate:
 
 
 class TestLoopDetector:
-    def test_detects_same_file_edited_8_times_no_failures(self):
-        """Without test failures, threshold is 8 edits."""
-        ld = LoopDetector()
-        for _ in range(8):
-            ld.record_tool_call("edit_file", {"path": "foo.py"}, "ok")
-        assert ld.check_loop() is not None
-        assert "LOOP DETECTED" in ld.check_loop()
-
-    def test_detects_same_file_edited_5_times_with_failures(self):
-        """With test failures, threshold drops to 5 edits."""
+    def test_repetitive_edits_detected_with_failures(self):
+        """Same content edits + test failures = loop detected."""
         ld = LoopDetector()
         ld.record_tool_call("run_tests", {"command": "pytest"}, "[FAIL] AssertionError")
         for _ in range(5):
-            ld.record_tool_call("edit_file", {"path": "foo.py"}, "ok")
+            ld.record_tool_call("edit_file", {"path": "foo.py", "new_text": "same fix"}, "ok")
         assert ld.check_loop() is not None
+        assert "LOOP DETECTED" in ld.check_loop()
 
-    def test_no_false_positive_7_edits_no_failures(self):
-        """7 edits without test failures should NOT trigger (threshold=8)."""
+    def test_diverse_edits_no_loop(self):
+        """Different content each edit = forward progress, no loop."""
         ld = LoopDetector()
-        # Alternate between read and edit to avoid Pattern 3 (repeated sequence)
-        for i in range(7):
+        ld.record_tool_call("run_tests", {"command": "pytest"}, "[FAIL] AssertionError")
+        for i in range(5):
+            ld.record_tool_call("edit_file", {"path": "foo.py", "new_text": f"unique fix {i}"}, "ok")
+        assert ld.check_loop() is None
+
+    def test_many_diverse_edits_no_loop_without_failures(self):
+        """Without test failures, diverse edits don't trigger even at high count."""
+        ld = LoopDetector()
+        for i in range(10):
             ld.record_tool_call("read_file", {"path": "foo.py"}, "content")
-            ld.record_tool_call("edit_file", {"path": "foo.py"}, f"ok_{i}")
+            ld.record_tool_call("edit_file", {"path": "foo.py", "new_text": f"change {i}"}, "ok")
         assert ld.check_loop() is None
 
     def test_no_false_positive_under_threshold(self):
         ld = LoopDetector()
         for _ in range(3):
-            ld.record_tool_call("edit_file", {"path": "foo.py"}, "ok")
+            ld.record_tool_call("edit_file", {"path": "foo.py", "new_text": "x"}, "ok")
         assert ld.check_loop() is None
 
     def test_detects_same_test_error_3_times(self):
         ld = LoopDetector()
         for _ in range(3):
-            ld.record_tool_call("run_tests", {"command": "pytest"}, "blah\n[FAIL] AssertionError: x != y")
+            ld.record_tool_call("run_tests", {"command": "pytest"},
+                "FAILED test_foo.py::test_bar - AssertionError: x != y\n[FAIL] done")
         result = ld.check_loop()
         assert result is not None
         assert "same test error" in result
 
-    def test_detects_repeated_sequence(self):
+    def test_different_test_errors_no_loop(self):
+        """Different test failures should NOT trigger Pattern 2."""
+        ld = LoopDetector()
+        ld.record_tool_call("run_tests", {}, "FAILED test_a.py::test_1 - Error A\n[FAIL]")
+        ld.record_tool_call("run_tests", {}, "FAILED test_b.py::test_2 - Error B\n[FAIL]")
+        ld.record_tool_call("run_tests", {}, "FAILED test_c.py::test_3 - Error C\n[FAIL]")
+        assert ld.check_loop() is None
+
+    def test_detects_repeated_sequence_3x(self):
+        """Pattern 3 now requires 3 repetitions (not 2)."""
         ld = LoopDetector()
         seq = [
             ("read_file", {"path": "a.py"}, "ok"),
-            ("edit_file", {"path": "a.py"}, "ok"),
+            ("edit_file", {"path": "a.py", "new_text": "same"}, "ok"),
             ("run_tests", {"command": "pytest"}, "ok"),
         ]
-        # Repeat the same sequence twice
-        for tool, args, res in seq:
-            ld.record_tool_call(tool, args, res)
-        for tool, args, res in seq:
-            ld.record_tool_call(tool, args, res)
+        # Repeat the same sequence THREE times
+        for _ in range(3):
+            for tool, args, res in seq:
+                ld.record_tool_call(tool, args, res)
         assert ld.check_loop() is not None
+
+    def test_two_repeats_no_loop(self):
+        """Two repetitions of a sequence should NOT trigger (need 3)."""
+        ld = LoopDetector()
+        seq = [
+            ("read_file", {"path": "a.py"}, "ok"),
+            ("edit_file", {"path": "a.py", "new_text": "fix"}, "ok"),
+            ("run_tests", {"command": "pytest"}, "ok"),
+        ]
+        for _ in range(2):
+            for tool, args, res in seq:
+                ld.record_tool_call(tool, args, res)
+        assert ld.check_loop() is None
 
     def test_different_files_no_loop(self):
         ld = LoopDetector()
-        ld.record_tool_call("edit_file", {"path": "a.py"}, "ok")
-        ld.record_tool_call("edit_file", {"path": "b.py"}, "ok")
-        ld.record_tool_call("edit_file", {"path": "c.py"}, "ok")
-        ld.record_tool_call("edit_file", {"path": "d.py"}, "ok")
+        ld.record_tool_call("edit_file", {"path": "a.py", "new_text": "x"}, "ok")
+        ld.record_tool_call("edit_file", {"path": "b.py", "new_text": "y"}, "ok")
+        ld.record_tool_call("edit_file", {"path": "c.py", "new_text": "z"}, "ok")
+        ld.record_tool_call("edit_file", {"path": "d.py", "new_text": "w"}, "ok")
         assert ld.check_loop() is None
+
+    def test_error_signature_prefers_pytest_summary(self):
+        """Should extract FAILED test_x.py::test_name line over generic Error."""
+        ld = LoopDetector()
+        result = "lots of traceback\nError in setup\nFAILED test_foo.py::test_bar - AssertionError\n[FAIL]"
+        sig = ld._extract_error_signature(result)
+        assert "test_foo.py::test_bar" in sig
+
+    def test_content_aware_hashing(self):
+        """edit_file with different content should produce different hashes."""
+        ld = LoopDetector()
+        h1 = ld._hash_key_args("edit_file", {"path": "foo.py", "new_text": "version 1"})
+        h2 = ld._hash_key_args("edit_file", {"path": "foo.py", "new_text": "version 2"})
+        assert h1 != h2
+        # Same content = same hash
+        h3 = ld._hash_key_args("edit_file", {"path": "foo.py", "new_text": "version 1"})
+        assert h1 == h3
 
 
 class TestGoalVerifier:

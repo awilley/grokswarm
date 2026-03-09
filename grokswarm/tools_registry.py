@@ -518,7 +518,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "spawn_agent",
-            "description": "Spawn a sub-agent to work on a subtask asynchronously. The agent runs in the background using the specified expert profile. Returns immediately with the agent ID. Use check_messages to get results when the agent finishes.",
+            "description": "Spawn a sub-agent to work on a subtask in the background. Returns immediately. Use wait_for_agent to block until the agent finishes and get its results.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -570,6 +570,21 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {},
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "wait_for_agent",
+            "description": "Wait for a spawned agent to finish and return its results. Blocks until the agent completes or the timeout is reached. Use this after spawn_agent to get the agent's output before proceeding.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Name of the agent to wait for (the name you gave to spawn_agent)."},
+                    "timeout": {"type": "integer", "description": "Max seconds to wait. Default: 300 (5 minutes)."}
+                },
+                "required": ["name"]
             }
         }
     },
@@ -676,7 +691,7 @@ READ_ONLY_TOOLS = {
     "find_symbol", "find_references",
     "web_search", "x_search", "code_execution",
     "analyze_image",
-    "check_messages", "list_agents",
+    "check_messages", "list_agents", "wait_for_agent",
     "list_bugs", "report_bug", "update_bug",
 }
 
@@ -737,7 +752,7 @@ _UPDATE_PLAN_SCHEMA = {
     }
 }
 
-_AGENT_EXCLUDED_TOOLS = {"spawn_agent"}
+_AGENT_EXCLUDED_TOOLS: set[str] = set()  # was {"spawn_agent"} -- agents can now delegate
 
 
 def get_agent_tool_schemas(allowed_tools: set[str] | None = None) -> list[dict]:

@@ -44,14 +44,46 @@ _THREADABLE_TOOLS_TRUSTED = _THREADABLE_TOOLS_BASE | frozenset({
 })
 
 
+def _estimate_tokens_text(text: str) -> int:
+    """Estimate token count for a string using word + punctuation splitting.
+
+    More accurate than len/4: counts words (~1 token each) plus extra tokens
+    for punctuation, brackets, operators, and whitespace-separated symbols.
+    Averages ~1.3 tokens per word for English, ~1.5 for code.
+    """
+    if not text:
+        return 0
+    # Split on whitespace; each word is ~1 token, but long words cost more
+    words = text.split()
+    count = 0
+    for w in words:
+        wlen = len(w)
+        if wlen <= 4:
+            count += 1
+        elif wlen <= 12:
+            count += 2
+        else:
+            # Very long tokens (URLs, base64, paths) split into ~4-char chunks
+            count += (wlen + 3) // 4
+    # Overhead: message framing tokens
+    return max(count, 1)
+
+
 def _estimate_tokens(messages: list) -> int:
     total = 0
     for m in messages:
+        total += 4  # per-message overhead (role, framing)
         content = m.get("content") or ""
-        total += len(content) // 4
+        if isinstance(content, str):
+            total += _estimate_tokens_text(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    total += _estimate_tokens_text(part.get("text", ""))
         if m.get("tool_calls"):
             for tc in m["tool_calls"]:
-                total += len(tc.get("function", {}).get("arguments", "")) // 4
+                args = tc.get("function", {}).get("arguments", "")
+                total += _estimate_tokens_text(args) + 10  # tool call overhead
     return total
 
 

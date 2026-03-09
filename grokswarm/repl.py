@@ -108,7 +108,7 @@ class SwarmCompleter(Completer):
                 cmds[f"/{alias}"] = entry.description
         return cmds
 
-    SESSION_SUBCMDS = ["list", "save", "load", "delete"]
+    SESSION_SUBCMDS = ["list", "save", "load", "delete", "search"]
     CONTEXT_SUBCMDS = ["refresh"]
     GIT_SUBCMDS = ["log", "diff", "branch"]
     PATH_COMMANDS = {"read", "edit", "list"}
@@ -437,8 +437,40 @@ def _handle_session_command(arg: str, conversation: list, current_session: str |
         else:
             shared.console.print(f"[swarm.warning]Session '{subarg}' not found.[/swarm.warning]")
         return None
+    elif subcmd == "search":
+        if not subarg:
+            shared.console.print("[swarm.warning]Usage: /session search <query>[/swarm.warning]")
+            return None
+        query_lower = subarg.lower()
+        hits = []
+        for f in shared.SESSIONS_DIR.glob("*.json"):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                # Search in summary, name, and message content
+                searchable = data.get("summary", "") + " " + data.get("name", "")
+                for m in data.get("messages", []):
+                    c = m.get("content")
+                    if isinstance(c, str):
+                        searchable += " " + c
+                if query_lower in searchable.lower():
+                    hits.append({
+                        "name": data.get("name", f.stem),
+                        "updated": data.get("updated", "?"),
+                        "messages": data.get("message_count", 0),
+                    })
+            except Exception:
+                continue
+        if hits:
+            shared.console.print(f"\n[swarm.accent]Sessions matching '{subarg}' ({len(hits)} found)[/swarm.accent]")
+            for h in hits:
+                ts = h["updated"][:16].replace("T", " ") if h["updated"] != "?" else "?"
+                shared.console.print(f"  [bold]{h['name']:<20}[/bold] [dim]{h['messages']} msgs  *  {ts}[/dim]")
+            shared.console.print()
+        else:
+            shared.console.print(f"[swarm.dim]No sessions matching '{subarg}'.[/swarm.dim]")
+        return None
     else:
-        shared.console.print("[swarm.dim]Usage: /session [list|save|load|delete] <name>[/swarm.dim]")
+        shared.console.print("[swarm.dim]Usage: /session [list|save|load|delete|search] <name>[/swarm.dim]")
         return None
 
 
