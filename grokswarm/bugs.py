@@ -142,9 +142,23 @@ _project_tracker: BugTracker | None = None
 _project_tracker_dir: Path | None = None
 
 
+def _is_own_project() -> bool:
+    """True when the current project IS GrokSwarm itself."""
+    try:
+        return shared.PROJECT_DIR.resolve() == shared.GROKSWARM_HOME.resolve()
+    except Exception:
+        return False
+
+
 def get_self_tracker() -> BugTracker:
-    """Get the global GrokSwarm self-bug tracker (~/.grokswarm/bugs.json)."""
+    """Get the GrokSwarm self-bug tracker.
+
+    When the current project IS GrokSwarm, returns the project tracker
+    so self-bugs and project-bugs are unified into one file.
+    """
     global _self_tracker
+    if _is_own_project():
+        return get_project_tracker()
     if _self_tracker is None:
         _self_tracker = BugTracker(_SELF_BUGS_FILE)
     return _self_tracker
