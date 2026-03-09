@@ -739,6 +739,25 @@ async def _chat_async(session_name: str | None = None):
     def _handle_edit_in_editor(event):
         event.current_buffer.open_in_editor(event.app)
 
+    @kb.add('escape', 'v', eager=True)
+    def _handle_paste_image(event):
+        try:
+            from PIL import ImageGrab
+            import base64
+            from io import BytesIO
+            img = ImageGrab.grabclipboard()
+            if img is None:
+                return
+            buf = BytesIO()
+            img.save(buf, format='PNG')
+            b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+            shared._pending_images.append(f"data:image/png;base64,{b64}")
+            event.app.invalidate()
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
     _multiline_supported = False
     try:
         @kb.add('s-enter', eager=True)
@@ -862,7 +881,15 @@ async def _chat_async(session_name: str | None = None):
             processing_busy = True
             shared._cancel_event.clear()
             try:
-                conversation.append({"role": "user", "content": shared._sanitize_surrogates(user_input)})
+                text = shared._sanitize_surrogates(user_input)
+                if shared._pending_images:
+                    content = [{"type": "text", "text": text}]
+                    for uri in shared._pending_images:
+                        content.append({"type": "image_url", "image_url": {"url": uri, "detail": "auto"}})
+                    shared._pending_images.clear()
+                    conversation.append({"role": "user", "content": content})
+                else:
+                    conversation.append({"role": "user", "content": text})
                 conversation = await _trim_conversation(conversation)
                 shared.state.request_auto_approve = False
                 await _stream_with_tools(conversation)
@@ -904,6 +931,10 @@ async def _chat_async(session_name: str | None = None):
                     if shared._toolbar_status and not shared._is_prompt_suspended:
                         icon = shared.THINKING_FRAMES[shared._toolbar_spinner_idx % len(shared.THINKING_FRAMES)]
                         parts.append(f"  <ansicyan>{icon}</ansicyan> <ansidarkgray>{shared._toolbar_status}</ansidarkgray>")
+                    if shared._pending_images:
+                        count = len(shared._pending_images)
+                        label = "image attached" if count == 1 else f"{count} images attached"
+                        parts.append(f"  <ansiyellow>[{label}]</ansiyellow>")
                     parts.append(f"<style fg='#444444'>{line_str}</style>")
                     parts.append("<b><ansibrightcyan>> </ansibrightcyan></b>")
                     return HTML("\n".join(parts))
@@ -926,7 +957,11 @@ async def _chat_async(session_name: str | None = None):
                     continue
 
                 lines = user_input.split('\n')
-                shared.console.print(f"[bold cyan]> [/bold cyan][bright_white]{lines[0]}[/bright_white]")
+                img_tag = ""
+                if shared._pending_images:
+                    n = len(shared._pending_images)
+                    img_tag = f" [yellow][{'image' if n == 1 else f'{n} images'} attached][/yellow]"
+                shared.console.print(f"[bold cyan]> [/bold cyan][bright_white]{lines[0]}[/bright_white]{img_tag}")
                 for l in lines[1:]:
                     shared.console.print(f"  [dim]\u00b7 [/dim][bright_white]{l}[/bright_white]")
 

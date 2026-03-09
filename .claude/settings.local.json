@@ -21,7 +21,8 @@
       "Bash(find:*)",
       "Bash(PYTHONUTF8=1 python:*)",
       "Bash(test:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(python3:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

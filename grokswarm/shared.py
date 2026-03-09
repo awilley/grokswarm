@@ -59,6 +59,9 @@ _suspend_lock = asyncio.Lock()
 # Escape-key cancellation flag (checked by streaming/tool loops)
 _cancel_event = asyncio.Event()
 
+# Pending clipboard images (base64 data URIs) queued via Alt+V
+_pending_images: list[str] = []
+
 
 def _set_status(text: str):
     global _toolbar_status, _toolbar_spinner_idx
@@ -109,9 +112,9 @@ MODEL_PRICING: dict[str, tuple[float, float, float]] = {
     # grok-4-fast variants (same pricing as 4-1-fast)
     "grok-4-fast-reasoning":       (0.20, 0.05,  0.50),
     "grok-4-fast-non-reasoning":   (0.20, 0.05,  0.50),
-    # Tier 3: Hardcore — complex planning, decomposition (xAI: $2.00/$6.00)
-    "grok-4.20-multi-agent":       (2.00, 0.50,  6.00),
-    "grok-4.20":                   (2.00, 0.50,  6.00),
+    # Tier 3: Hardcore — complex planning, decomposition (xAI: $2.00/$6.00, cached $0.20)
+    "grok-4.20-multi-agent":       (2.00, 0.20,  6.00),
+    "grok-4.20":                   (2.00, 0.20,  6.00),
     # grok-4 variants (longer prefixes first)
     "grok-4-0709":                 (3.00, 0.75, 15.00),
     "grok-4":                      (3.00, 0.75, 15.00),

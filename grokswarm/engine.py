@@ -121,6 +121,8 @@ async def _compact_conversation(conversation: list) -> list:
     for m in old_messages:
         role = m["role"]
         content = m.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(p.get("text", "[image]") for p in content if isinstance(p, dict))
         if role == "tool":
             snippet = content[:150].replace("\n", " ") if content else "(empty)"
             old_text_parts.append(f"  tool result: {snippet}")
