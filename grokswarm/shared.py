@@ -128,6 +128,22 @@ MODEL_PRICING: dict[str, tuple[float, float, float]] = {
 }
 _DEFAULT_PRICING = (0.20, 0.05, 0.50)
 
+# -- Context window sizes (tokens) --
+MODEL_CONTEXT_WINDOW: dict[str, int] = {
+    "grok-4": 131072,
+    "grok-3": 131072,
+    "grok-2": 131072,
+}
+_DEFAULT_CONTEXT_WINDOW = 131072
+
+
+def _get_context_window(model: str) -> int:
+    m = model.lower()
+    for prefix, size in MODEL_CONTEXT_WINDOW.items():
+        if m.startswith(prefix):
+            return size
+    return _DEFAULT_CONTEXT_WINDOW
+
 
 def _get_pricing(model: str) -> tuple[float, float, float]:
     """Returns (input_rate, cached_input_rate, output_rate) per 1M tokens."""

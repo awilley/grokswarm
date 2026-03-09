@@ -165,13 +165,9 @@ async def _trim_conversation(conversation: list) -> list:
     system = [m for m in conversation if m["role"] == "system"]
     others = [m for m in conversation if m["role"] != "system"]
     est_tokens = _estimate_tokens(conversation)
-    if len(others) > COMPACTION_THRESHOLD or est_tokens > COMPACTION_TOKEN_LIMIT:
+    if len(others) > MAX_CONVERSATION_MESSAGES or est_tokens > COMPACTION_TOKEN_LIMIT:
         shared.console.print(f"[swarm.dim]  ~ compacting conversation history (~{est_tokens:,} tokens, {len(others)} msgs)...[/swarm.dim]")
         return await _compact_conversation(conversation)
-    if len(others) > MAX_CONVERSATION_MESSAGES:
-        others = others[-MAX_CONVERSATION_MESSAGES:]
-        while others and others[0]["role"] == "tool":
-            others.pop(0)
     return system + others
 
 

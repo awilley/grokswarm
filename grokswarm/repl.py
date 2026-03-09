@@ -42,6 +42,7 @@ from grokswarm.cmd_handlers import (
     handle_tasks, handle_budget, handle_model, handle_bugs, handle_memory,
     handle_eval, handle_self_improve, handle_daemon, handle_self_eval,
     handle_vim, handle_history, handle_self_scores,
+    handle_diff, handle_copy,
 )
 
 # ---------------------------------------------------------------------------
@@ -97,6 +98,8 @@ _cmd("self-eval",    "Eval -> fix -> re-eval loop",         allow_while_busy=Fal
 _cmd("vim",          "Toggle vi editing mode")(handle_vim)
 _cmd("history",      "Search command history",              aliases=["hist"])(handle_history)
 _cmd("self-scores",  "Show latest eval scores",             aliases=["scores"])(handle_self_scores)
+_cmd("diff",         "Show session file changes as diff")(handle_diff)
+_cmd("copy",         "Copy last response to clipboard")(handle_copy)
 # fmt: on
 
 # -- Context-Aware Tab Completion --
@@ -850,7 +853,21 @@ async def _chat_async(session_name: str | None = None):
                 else:
                     agent_parts.append(f"{aname}: {ag.phase.title()}...")
             parts.append(f"  <ansidarkgray>{len(active_agents)} agent{'s' if len(active_agents) != 1 else ''} running | {' | '.join(agent_parts)}</ansidarkgray>")
-        # Status line: project | model | tokens | cost | [VI] | >> MODE
+        # Context window usage bar
+        try:
+            from grokswarm.engine import _estimate_tokens
+            est = _estimate_tokens(conversation)
+            ctx_limit = shared._get_context_window(shared.MODEL)
+            pct = min(est / ctx_limit, 1.0) if ctx_limit else 0
+            bar_w = 8
+            filled = int(bar_w * pct)
+            ctx_bar = "\u2588" * filled + "\u2591" * (bar_w - filled)
+            pct_int = int(pct * 100)
+            ctx_color = "ansired" if pct_int >= 80 else ("ansiyellow" if pct_int >= 60 else "ansidarkgray")
+            ctx_tag = f" <ansidarkgray>|</ansidarkgray> <{ctx_color}>[{ctx_bar}] {pct_int}%</{ctx_color}>"
+        except Exception:
+            ctx_tag = ""
+        # Status line: project | model | tokens | cost | ctx% | [VI] | >> MODE
         proj_name = shared.PROJECT_DIR.name
         model_short = shared.MODEL.split("/")[-1].split("-")[-1][:12] if shared.MODEL else "?"
         tok_str = _fmt_tokens(shared.state.global_tokens_used)
@@ -861,7 +878,7 @@ async def _chat_async(session_name: str | None = None):
             f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{model_short}</ansidarkgray>"
             f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{tok_str} tok</ansidarkgray>"
             f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{cost_str}</ansidarkgray>"
-            f"{vi_tag}"
+            f"{ctx_tag}{vi_tag}"
             f" <ansidarkgray>|</ansidarkgray> <ansimagenta>\u25b6\u25b6</ansimagenta> {mode_str}"
         )
         return HTML("\n".join(parts))

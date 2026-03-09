@@ -2,6 +2,7 @@
 
 import os
 import re
+import difflib
 import shutil
 import subprocess
 from pathlib import Path
@@ -80,10 +81,29 @@ def write_file(path: str, content: str):
         return "Access denied: outside project directory."
     if shared.state.agent_mode == 0:
         shared.console.print(f"[bold yellow]About to WRITE to:[/bold yellow] {full_path}")
-        preview = content[:300]
-        if len(content) > 300:
-            preview += "..."
-        shared.console.print(f"[dim]Preview:[/dim]\n{preview}")
+        if full_path.is_file():
+            try:
+                from rich.syntax import Syntax
+                current = full_path.read_text(encoding="utf-8", errors="ignore")
+                diff_lines = list(difflib.unified_diff(
+                    current.splitlines(), content.splitlines(),
+                    fromfile="current", tofile="new", lineterm=""))
+                if diff_lines:
+                    display = diff_lines[:50]
+                    extra = len(diff_lines) - 50
+                    diff_text = "\n".join(display)
+                    if extra > 0:
+                        diff_text += f"\n... (+{extra} more lines)"
+                    shared.console.print(Syntax(diff_text, "diff", theme="monokai"))
+                else:
+                    shared.console.print("[dim]No changes detected.[/dim]")
+            except Exception:
+                preview = content[:300] + ("..." if len(content) > 300 else "")
+                shared.console.print(f"[dim]Preview:[/dim]\n{preview}")
+        else:
+            shared.console.print(f"[dim]New file ({len(content)} chars):[/dim]")
+            preview = content[:300] + ("..." if len(content) > 300 else "")
+            shared.console.print(f"[dim]{preview}[/dim]")
     if shared._auto_approve("Approve write?", default=False):
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding="utf-8")

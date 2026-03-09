@@ -1041,3 +1041,71 @@ async def handle_self_scores(arg: str, ctx: CmdContext) -> None:
     shared.console.print()
     shared.console.print(tbl)
     shared.console.print()
+
+
+async def handle_diff(arg: str, ctx: CmdContext) -> None:
+    """Show all file changes in this session (edit_history) as a diff."""
+    from rich.syntax import Syntax
+    if not shared.state.edit_history:
+        shared.console.print("[swarm.dim]No file edits in this session.[/swarm.dim]")
+        return
+    # Collect unique files from edit history
+    seen_files: dict[str, str | None] = {}  # path -> original content (first snapshot)
+    for path, content in shared.state.edit_history:
+        if path not in seen_files:
+            seen_files[path] = content  # first recorded pre-edit content
+    total_lines = 0
+    for path, original in seen_files.items():
+        fp = Path(path)
+        if not fp.is_file():
+            if original is not None:
+                shared.console.print(f"[bold red]Deleted:[/bold red] {path}")
+            continue
+        current = fp.read_text(encoding="utf-8", errors="ignore")
+        if original is None:
+            # File was created in this session
+            lines = current.splitlines()
+            shared.console.print(f"[bold green]New file:[/bold green] {path} (+{len(lines)} lines)")
+            total_lines += len(lines)
+        else:
+            diff_lines = list(difflib.unified_diff(
+                original.splitlines(), current.splitlines(),
+                fromfile=f"a/{Path(path).name}", tofile=f"b/{Path(path).name}", lineterm=""))
+            if diff_lines:
+                display = diff_lines[:80]
+                extra = len(diff_lines) - 80
+                diff_text = "\n".join(display)
+                if extra > 0:
+                    diff_text += f"\n... (+{extra} more lines)"
+                shared.console.print(Syntax(diff_text, "diff", theme="monokai"))
+                total_lines += len(diff_lines)
+            else:
+                shared.console.print(f"[dim]{path}: no net changes[/dim]")
+    shared.console.print(f"\n[swarm.dim]{len(seen_files)} file(s) touched, ~{total_lines} diff lines[/swarm.dim]")
+
+
+async def handle_copy(arg: str, ctx: CmdContext) -> None:
+    """Copy last assistant response to clipboard."""
+    # Find last assistant message
+    last_text = None
+    for msg in reversed(ctx.conversation):
+        if msg.get("role") == "assistant":
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                last_text = content
+                break
+    if not last_text:
+        shared.console.print("[swarm.dim]No assistant response to copy.[/swarm.dim]")
+        return
+    try:
+        if os.name == "nt":
+            proc = subprocess.Popen(["clip.exe"], stdin=subprocess.PIPE)
+            proc.communicate(last_text.encode("utf-16-le"))
+        else:
+            # macOS or Linux
+            cmd = "pbcopy" if sys.platform == "darwin" else "xclip -selection clipboard"
+            proc = subprocess.Popen(cmd.split(), stdin=subprocess.PIPE)
+            proc.communicate(last_text.encode("utf-8"))
+        shared.console.print(f"[swarm.accent]Copied {len(last_text)} chars to clipboard.[/swarm.accent]")
+    except Exception as e:
+        shared.console.print(f"[swarm.error]Clipboard error: {e}[/swarm.error]")

@@ -2,6 +2,7 @@
 
 import json
 import sys
+import time
 import yaml
 import sqlite3
 import asyncio
@@ -448,6 +449,7 @@ async def run_expert(name: str, task_desc: str, bus: SwarmBus | None = None,
 
     _auto_checkpoint_before_agent(display_name)
     agent.transition(AgentState.THINKING)
+    _agent_start_time = time.monotonic()
 
     # -- Build system prompt --
     prior_context = ""
@@ -698,6 +700,10 @@ Rules:
         if bus:
             bus.post(display_name, report, kind="result")
         agent.transition(AgentState.DONE)
+        # Terminal bell if agent ran >30s (notification for tabbed-away users)
+        if time.monotonic() - _agent_start_time > 30:
+            sys.__stdout__.write("\a")
+            sys.__stdout__.flush()
 
         # Record completion in project intelligence
         try:
