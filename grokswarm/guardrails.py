@@ -1,15 +1,32 @@
-"""Guardrails: PlanGate, GoalVerifier, LoopDetector, EvidenceTracker, Orchestrator, ToolFilter."""
+"""Guardrails: PlanGate, GoalVerifier, LoopDetector, EvidenceTracker, Orchestrator, ToolFilter,
+TaskComplexity, LessonsDB, CostGuard, DynamicTools."""
 
 import json
 import asyncio
 import hashlib
 import re
+import time
 from dataclasses import asdict
 from pathlib import Path
+from datetime import datetime
+
+import yaml
 
 import grokswarm.shared as shared
 from grokswarm.models import AgentState, SubTask, TaskDAG
 from grokswarm.tools_registry import READ_ONLY_TOOLS
+
+# 4-tier model routing:
+#   fast       — exploration, read-only, simple tool calls (non-reasoning, cheapest)
+#   reasoning  — standard agent execution (default)
+#   hardcore   — complex planning, decomposition, difficult debugging
+#   multi_agent — orchestrator task decomposition
+MODEL_ROUTING = {
+    "fast":        "grok-4-1-fast-non-reasoning",
+    "reasoning":   "grok-4-1-fast-reasoning",
+    "hardcore":    "grok-4.20-experimental-beta-latest",
+    "multi_agent": "grok-4.20-multi-agent-experimental-beta-latest",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -272,46 +289,62 @@ RULES:
 - Include a final verification sub-task that runs tests and checks all deliverables
 - Task: {task}"""
 
+    # Model fallback chain for decomposition
+    _DECOMPOSE_MODELS = [
+        MODEL_ROUTING["multi_agent"],
+        MODEL_ROUTING["hardcore"],
+        MODEL_ROUTING["reasoning"],
+    ]
+
     @staticmethod
     async def decompose(task: str, experts: list[str]) -> TaskDAG:
-        """Use LLM to decompose task into a TaskDAG. Uses multi-agent model."""
+        """Use LLM to decompose task into a TaskDAG. Tries multi-agent -> hardcore -> reasoning fallback."""
         prompt = Orchestrator.DECOMPOSITION_PROMPT.format(
             experts=experts, task=task
         )
-        decompose_model = ToolFilter.get_orchestrator_model()
-        try:
-            response = await shared._api_call_with_retry(
-                lambda: shared.client.chat.completions.create(
-                    model=decompose_model,
-                    messages=[
-                        {"role": "system", "content": "You are a task decomposition engine. Output valid JSON only."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    response_format={"type": "json_object"},
-                ),
-                label="Orchestrator:decompose"
-            )
-            if hasattr(response, 'usage') and response.usage:
-                from grokswarm.agents import _record_usage, _extract_cached_tokens
-                _record_usage(decompose_model, response.usage.prompt_tokens, response.usage.completion_tokens,
-                              _extract_cached_tokens(response.usage))
+        messages = [
+            {"role": "system", "content": "You are a task decomposition engine. Output valid JSON only."},
+            {"role": "user", "content": prompt},
+        ]
 
-            data = json.loads(response.choices[0].message.content.strip())
-            subtasks = []
-            for item in data.get("subtasks", []):
-                subtasks.append(SubTask(
-                    id=item.get("id", f"t{len(subtasks)+1}"),
-                    description=item.get("description", ""),
-                    expert=item.get("expert", "assistant"),
-                    depends_on=item.get("depends_on", []),
-                    deliverables=item.get("deliverables", []),
-                ))
-            return TaskDAG(goal=task, subtasks=subtasks)
-        except Exception as e:
-            shared.console.print(f"[swarm.warning]Orchestrator decomposition failed: {e}. Using single-task fallback.[/swarm.warning]")
-            return TaskDAG(goal=task, subtasks=[
-                SubTask(id="t1", description=task, expert=experts[0] if experts else "assistant")
-            ])
+        for decompose_model in Orchestrator._DECOMPOSE_MODELS:
+            try:
+                response = await shared._api_call_with_retry(
+                    lambda m=decompose_model: shared.client.chat.completions.create(
+                        model=m,
+                        messages=messages,
+                        response_format={"type": "json_object"},
+                    ),
+                    label=f"Orchestrator:decompose({decompose_model})"
+                )
+                if hasattr(response, 'usage') and response.usage:
+                    from grokswarm.agents import _record_usage, _extract_cached_tokens
+                    _record_usage(decompose_model, response.usage.prompt_tokens, response.usage.completion_tokens,
+                                  _extract_cached_tokens(response.usage))
+
+                data = json.loads(response.choices[0].message.content.strip())
+                subtasks = []
+                for item in data.get("subtasks", []):
+                    subtasks.append(SubTask(
+                        id=item.get("id", f"t{len(subtasks)+1}"),
+                        description=item.get("description", ""),
+                        expert=item.get("expert", "assistant"),
+                        depends_on=item.get("depends_on", []),
+                        deliverables=item.get("deliverables", []),
+                    ))
+                if subtasks:
+                    return TaskDAG(goal=task, subtasks=subtasks)
+                # Empty subtasks — try next model
+                shared.console.print(f"[swarm.warning]Model {decompose_model} returned empty subtasks, trying fallback...[/swarm.warning]")
+            except Exception as e:
+                shared.console.print(f"[swarm.warning]Orchestrator model {decompose_model} failed: {e}. Trying fallback...[/swarm.warning]")
+                continue
+
+        # All models failed — single-task fallback
+        shared.console.print("[swarm.warning]All orchestrator models failed. Using single-task fallback.[/swarm.warning]")
+        return TaskDAG(goal=task, subtasks=[
+            SubTask(id="t1", description=task, expert=experts[0] if experts else "assistant")
+        ])
 
     @staticmethod
     async def validate_phase_results(subtask: SubTask) -> tuple[bool, str]:
@@ -432,18 +465,6 @@ TASK_TYPE_TOOLS = {
     },
 }
 
-# 4-tier model routing:
-#   fast       — exploration, read-only, simple tool calls (non-reasoning, cheapest)
-#   reasoning  — standard agent execution (default)
-#   hardcore   — complex planning, decomposition, difficult debugging
-#   multi_agent — orchestrator task decomposition
-MODEL_ROUTING = {
-    "fast":        "grok-4-1-fast-non-reasoning",
-    "reasoning":   "grok-4-1-fast-reasoning",
-    "hardcore":    "grok-4.20-experimental-beta-latest",
-    "multi_agent": "grok-4.20-multi-agent-experimental-beta-latest",
-}
-
 
 class ToolFilter:
     @staticmethod
@@ -480,6 +501,260 @@ class ToolFilter:
     def get_orchestrator_model() -> str:
         """Returns the multi-agent model for orchestrator decomposition."""
         return MODEL_ROUTING["multi_agent"]
+
+
+# ---------------------------------------------------------------------------
+# Feature 8: Task Complexity Classifier
+# ---------------------------------------------------------------------------
+
+class TaskComplexity:
+    """Classifies task complexity to decide whether to skip planning."""
+
+    # Patterns that indicate a simple, single-action task
+    SIMPLE_PATTERNS = [
+        re.compile(r'\b(add|write|insert)\s+(a\s+)?docstring', re.I),
+        re.compile(r'\b(fix|correct)\s+(a\s+)?(typo|spelling|whitespace)', re.I),
+        re.compile(r'\brename\s+\w+\s+to\s+\w+', re.I),
+        re.compile(r'\b(delete|remove)\s+(the\s+)?(unused|dead)\s+(code|import|variable|function)', re.I),
+        re.compile(r'\b(add|insert)\s+(a\s+)?(comment|type\s*hint|annotation)', re.I),
+        re.compile(r'\b(update|change|set)\s+(the\s+)?version', re.I),
+        re.compile(r'\b(add|append)\s+.{0,20}\s+to\s+.{0,30}\.(txt|md|cfg|ini|toml|yaml|yml)', re.I),
+        re.compile(r'\bformat\s+(the\s+)?(code|file)', re.I),
+    ]
+
+    # Patterns that indicate a complex, multi-step task
+    COMPLEX_INDICATORS = [
+        re.compile(r'\b(refactor|redesign|rewrite|overhaul|migrate)\b', re.I),
+        re.compile(r'\b(implement|build|create)\s+(a\s+)?(new|full|complete)', re.I),
+        re.compile(r'\band\s+(then|also|additionally)\b', re.I),  # multi-part task
+        re.compile(r'\b(multiple|several|all)\s+(files?|modules?|components?)', re.I),
+        re.compile(r'\b(test|verify|validate)\s+(and|then)\s+(fix|update|change)', re.I),
+        re.compile(r'\bintegrat(e|ion)\b', re.I),
+    ]
+
+    @staticmethod
+    def classify(task: str) -> str:
+        """Returns 'simple', 'moderate', or 'complex'."""
+        # Very short tasks are likely simple
+        word_count = len(task.split())
+
+        # Check explicit simple patterns
+        for pat in TaskComplexity.SIMPLE_PATTERNS:
+            if pat.search(task):
+                return "simple"
+
+        # Check explicit complex patterns
+        for pat in TaskComplexity.COMPLEX_INDICATORS:
+            if pat.search(task):
+                return "complex"
+
+        # Heuristic: short tasks (under 15 words) without complex indicators -> simple
+        if word_count <= 12:
+            return "simple"
+
+        # Medium-length tasks
+        if word_count <= 30:
+            return "moderate"
+
+        return "complex"
+
+    @staticmethod
+    def should_skip_planning(task: str) -> bool:
+        """Returns True if the task is simple enough to skip the planning phase."""
+        return TaskComplexity.classify(task) == "simple"
+
+
+# ---------------------------------------------------------------------------
+# Feature 9: Cross-Session Learning (LessonsDB)
+# ---------------------------------------------------------------------------
+
+class LessonsDB:
+    """Persistent store of failure patterns and their solutions."""
+
+    def __init__(self, path: Path | None = None):
+        self._path = path or (shared.PROJECT_DIR / ".grokswarm" / "lessons_learned.yaml")
+
+    def _load(self) -> list[dict]:
+        if self._path.exists():
+            try:
+                data = yaml.safe_load(self._path.read_text(encoding="utf-8"))
+                return data if isinstance(data, list) else []
+            except Exception:
+                return []
+        return []
+
+    def _save(self, lessons: list[dict]):
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        # Keep at most 50 lessons, newest first
+        lessons = lessons[:50]
+        self._path.write_text(yaml.dump(lessons, default_flow_style=False, allow_unicode=True), encoding="utf-8")
+
+    def record_lesson(self, error_signature: str, fix_description: str,
+                      files_involved: list[str], expert: str = ""):
+        """Record a lesson learned from a loop recovery."""
+        lessons = self._load()
+        # Don't duplicate similar lessons
+        for existing in lessons:
+            if existing.get("error_sig", "")[:60] == error_signature[:60]:
+                # Update existing lesson
+                existing["fix"] = fix_description
+                existing["count"] = existing.get("count", 1) + 1
+                existing["last_seen"] = datetime.now().isoformat()
+                self._save(lessons)
+                return
+        lessons.insert(0, {
+            "error_sig": error_signature[:200],
+            "fix": fix_description[:500],
+            "files": files_involved[:10],
+            "expert": expert,
+            "count": 1,
+            "created": datetime.now().isoformat(),
+            "last_seen": datetime.now().isoformat(),
+        })
+        self._save(lessons)
+
+    def find_relevant(self, error_signature: str = "", files: list[str] | None = None,
+                      limit: int = 3) -> list[dict]:
+        """Find lessons relevant to the current error or files."""
+        lessons = self._load()
+        if not lessons:
+            return []
+
+        scored: list[tuple[float, dict]] = []
+        for lesson in lessons:
+            score = 0.0
+            # Error signature overlap
+            if error_signature and lesson.get("error_sig"):
+                sig_words = set(error_signature.lower().split())
+                lesson_words = set(lesson["error_sig"].lower().split())
+                overlap = len(sig_words & lesson_words)
+                if overlap > 2:
+                    score += overlap * 2.0
+            # File overlap
+            if files and lesson.get("files"):
+                file_overlap = len(set(files) & set(lesson["files"]))
+                if file_overlap > 0:
+                    score += file_overlap * 3.0
+            # Frequency bonus
+            score += min(lesson.get("count", 1), 5) * 0.5
+            if score > 0:
+                scored.append((score, lesson))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [lesson for _, lesson in scored[:limit]]
+
+    def format_for_prompt(self, lessons: list[dict]) -> str:
+        """Format lessons into a system prompt injection."""
+        if not lessons:
+            return ""
+        lines = ["[SYSTEM -- LESSONS FROM PREVIOUS SESSIONS]",
+                 "These issues were encountered before in this project:"]
+        for i, lesson in enumerate(lessons, 1):
+            lines.append(f"  {i}. Error: {lesson['error_sig'][:100]}")
+            lines.append(f"     Fix: {lesson['fix'][:200]}")
+            if lesson.get("files"):
+                lines.append(f"     Files: {', '.join(lesson['files'][:5])}")
+        lines.append("Use this knowledge to avoid repeating the same mistakes.")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Feature 10: Cost Guard (session limits + rate alarm)
+# ---------------------------------------------------------------------------
+
+class CostGuard:
+    """Monitors session spending and enforces cost limits."""
+
+    def __init__(self):
+        self.session_budget_usd: float = 0.0  # 0 = no limit
+        self.cost_timestamps: list[tuple[float, float]] = []  # (time, cost_delta)
+        self._warned_thresholds: set[float] = set()
+        self.WARN_THRESHOLDS = [1.0, 5.0, 10.0, 25.0, 50.0]
+        self.RATE_LIMIT_PER_MIN: float = 2.0  # dollars per minute
+
+    def set_budget(self, budget_usd: float):
+        self.session_budget_usd = budget_usd
+
+    def record_cost(self, cost_delta: float):
+        """Record a cost event for rate tracking."""
+        self.cost_timestamps.append((time.time(), cost_delta))
+        # Trim old entries (keep last 5 minutes)
+        cutoff = time.time() - 300
+        self.cost_timestamps = [(t, c) for t, c in self.cost_timestamps if t > cutoff]
+
+    def get_rate_per_min(self) -> float:
+        """Calculate current spending rate in $/min over the last 60 seconds."""
+        now = time.time()
+        cutoff = now - 60
+        recent = sum(c for t, c in self.cost_timestamps if t > cutoff)
+        return recent  # already per-minute since window is 60s
+
+    def check(self, total_session_cost: float) -> list[str]:
+        """Returns list of actions to take: 'warn', 'pause_all', or empty."""
+        actions = []
+
+        # Threshold warnings
+        for threshold in self.WARN_THRESHOLDS:
+            if total_session_cost >= threshold and threshold not in self._warned_thresholds:
+                self._warned_thresholds.add(threshold)
+                actions.append(f"warn:${threshold:.0f}")
+
+        # Budget exceeded
+        if self.session_budget_usd > 0 and total_session_cost >= self.session_budget_usd:
+            actions.append("pause_all")
+
+        # Rate alarm
+        rate = self.get_rate_per_min()
+        if rate > self.RATE_LIMIT_PER_MIN:
+            actions.append(f"rate_alarm:${rate:.2f}/min")
+
+        return actions
+
+
+# ---------------------------------------------------------------------------
+# Feature 11: Dynamic Tool Granting
+# ---------------------------------------------------------------------------
+
+# Task keywords -> additional tools to grant
+_DYNAMIC_TOOL_RULES: list[tuple[re.Pattern, set[str]]] = [
+    (re.compile(r'\b(screenshot|visual|ui|tui|display|render|screen)\b', re.I),
+     {"capture_tui_screenshot", "analyze_image", "run_app_capture"}),
+    (re.compile(r'\b(test|spec|assert|verify|check)\b', re.I),
+     {"run_tests"}),
+    (re.compile(r'\b(run|execute|launch|start|deploy|install|build)\b', re.I),
+     {"run_shell"}),
+    (re.compile(r'\b(search|find|look\s*up|google|web)\b', re.I),
+     {"web_search", "fetch_page"}),
+    (re.compile(r'\b(git|commit|branch|merge|push|pull|diff|log|stash)\b', re.I),
+     {"git_status", "git_diff", "git_log", "git_commit", "git_branch", "git_checkout"}),
+    (re.compile(r'\b(image|picture|photo|png|jpg|svg)\b', re.I),
+     {"analyze_image"}),
+]
+
+
+class DynamicTools:
+    """Grants additional tools based on task content."""
+
+    @staticmethod
+    def infer_extra_tools(task: str) -> set[str]:
+        """Returns set of additional tool names the task likely needs."""
+        extras: set[str] = set()
+        for pattern, tools in _DYNAMIC_TOOL_RULES:
+            if pattern.search(task):
+                extras |= tools
+        return extras
+
+    @staticmethod
+    def merge_tools(expert_tools: set[str] | None, task: str) -> set[str] | None:
+        """Merge expert's static tools with dynamically inferred ones.
+        Returns None (all tools) if expert has no whitelist."""
+        extras = DynamicTools.infer_extra_tools(task)
+        if expert_tools is None:
+            return None  # expert already has all tools
+        if not extras:
+            return expert_tools
+        merged = expert_tools | extras
+        return merged
 
 
 # ---------------------------------------------------------------------------

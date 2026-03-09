@@ -18,7 +18,11 @@ from grokswarm.engine import _execute_tool, _repair_json, _trim_conversation, _t
 from grokswarm.guardrails import (
     PlanGate, GoalVerifier, LoopDetector, EvidenceTracker,
     ToolFilter, Orchestrator, notify,
+    TaskComplexity, LessonsDB, CostGuard, DynamicTools,
 )
+
+# Singleton cost guard for the session
+_cost_guard = CostGuard()
 
 
 class SwarmBus:
@@ -364,6 +368,53 @@ def _build_completion_report(display_name: str, tool_actions: list[str], rounds_
     return "\n".join(lines)
 
 
+def _log_tool_call(agent, tool_name: str, args: dict, result: str, round_num: int):
+    """Append to agent's rolling tool call log for /peek visibility."""
+    args_summary = ""
+    if tool_name in ("read_file", "write_file", "edit_file"):
+        args_summary = args.get("path", "")
+    elif tool_name == "run_tests":
+        args_summary = args.get("command", "default")
+    elif tool_name == "run_shell":
+        args_summary = args.get("command", "")[:60]
+    elif tool_name == "update_plan":
+        args_summary = f"{len(args.get('steps', []))} steps"
+    else:
+        args_summary = str(list(args.keys()))[:40]
+
+    result_preview = result[:120].replace("\n", " ")
+    agent.tool_call_log.append({
+        "tool": tool_name,
+        "args": args_summary,
+        "result": result_preview,
+        "round": round_num,
+    })
+    # Keep only last 10 entries
+    if len(agent.tool_call_log) > 10:
+        agent.tool_call_log = agent.tool_call_log[-10:]
+
+
+def _planning_prompt(task_desc: str) -> str:
+    """Return the planning section of the system prompt, or simplified version for simple tasks."""
+    if TaskComplexity.should_skip_planning(task_desc):
+        return """EXECUTION MODE:
+- This is a simple task. All tools are available immediately.
+- Just do it: read what you need, make the change, verify it works.
+- Use update_plan to track your steps if you want, but it's optional."""
+    return """PLANNING PHASE (ENFORCED):
+- You start in PLANNING mode. Only read-only tools + update_plan are available.
+- Read the relevant code, understand the problem, then call update_plan with your steps.
+- Include which files you will modify in your step descriptions.
+- After update_plan is called with a complete plan, you will transition to EXECUTION mode and write tools become available.
+- Do NOT try to use write_file, edit_file, run_shell, or git_commit during planning.
+
+PLANNING (MANDATORY):
+- Your VERY FIRST action must be calling update_plan to outline your work steps.
+- Each step should be a short, concrete action (e.g. "Read app.py to understand layout", "Fix Container layout param", "Run app to verify fix").
+- As you complete each step, call update_plan again with the updated statuses. Mark the current step "in-progress" and completed steps "done".
+- The user monitors your plan in real-time. Keep it accurate."""
+
+
 async def run_expert(name: str, task_desc: str, bus: SwarmBus | None = None, agent_name: str | None = None):
     expert_file = shared.EXPERTS_DIR / f"{name.lower()}.yaml"
     if not expert_file.exists():
@@ -435,18 +486,7 @@ Rules:
 - Work fast: create files, write code, test, done. Minimize rounds.
 - BEFORE you finish, you MUST run run_tests (or run_shell with appropriate test command) if you modified any code files. Never claim success without verified test results.
 
-PLANNING PHASE (ENFORCED):
-- You start in PLANNING mode. Only read-only tools + update_plan are available.
-- Read the relevant code, understand the problem, then call update_plan with your steps.
-- Include which files you will modify in your step descriptions.
-- After update_plan is called with a complete plan (2+ steps), you will transition to EXECUTION mode and write tools become available.
-- Do NOT try to use write_file, edit_file, run_shell, or git_commit during planning.
-
-PLANNING (MANDATORY):
-- Your VERY FIRST action must be calling update_plan to outline your work steps.
-- Each step should be a short, concrete action (e.g. "Read app.py to understand layout", "Fix Container layout param", "Run app to verify fix").
-- As you complete each step, call update_plan again with the updated statuses. Mark the current step "in-progress" and completed steps "done".
-- The user monitors your plan in real-time. Keep it accurate.{prior_context}{project_context}"""
+{_planning_prompt(task_desc)}{prior_context}{project_context}"""
 
     conversation = [
         {"role": "system", "content": system_prompt},
@@ -461,19 +501,31 @@ PLANNING (MANDATORY):
     # -- Guardrails setup --
     loop_detector = LoopDetector()
     evidence_tracker = EvidenceTracker()
+    lessons_db = LessonsDB()
     loop_escalation_count = 0
     model_escalated = False  # True when loop detector escalated to hardcore model
+    loop_error_at_escalation: str = ""  # error sig when loop was detected (for lesson recording)
 
-    # Tool filtering based on expert YAML
+    # Complexity-based planning skip
+    if TaskComplexity.should_skip_planning(task_desc):
+        agent.phase = "executing"
+        shared._log(f"agent {display_name}: simple task, skipping planning phase")
+
+    # Dynamic tool granting: merge expert's static tools with task-inferred ones
     allowed_tools = ToolFilter.get_tools_for_expert(data)
+    allowed_tools = DynamicTools.merge_tools(allowed_tools, task_desc)
     agent_tools = get_agent_tool_schemas(allowed_tools=allowed_tools)
 
     # Model routing per phase (4-tier system)
-    # Planning: hardcore model (reasoning matters most when forming a plan)
-    # Execution: expert's preferred tier (default: reasoning)
     planning_model = ToolFilter.get_model_for_phase(data, "planning")
     execution_model = ToolFilter.get_model_for_phase(data, "executing")
     escalation_model = ToolFilter.get_model_for_escalation()
+
+    # Inject lessons from previous sessions
+    relevant_lessons = lessons_db.find_relevant(files=[])
+    if relevant_lessons:
+        lesson_text = lessons_db.format_for_prompt(relevant_lessons)
+        conversation.append({"role": "user", "content": lesson_text})
 
     shared.state.agent_mode += 1
     try:
@@ -539,6 +591,7 @@ PLANNING (MANDATORY):
 
             # Track which model is used this round
             evidence_tracker.record_model(round_model)
+            agent.current_model = round_model
 
             _api_kwargs = dict(
                 model=round_model,
@@ -566,6 +619,28 @@ PLANNING (MANDATORY):
                     + (cached / 1_000_000.0) * _cached_r
                     + (ct / 1_000_000.0) * _out_r
                 )
+
+            # Track cached tokens on the agent
+            if hasattr(response, 'usage') and response.usage:
+                agent.cached_tokens_total += _extract_cached_tokens(response.usage)
+
+            # -- Cost guard: check session spending --
+            cost_delta = agent.cost_usd  # approximate
+            _cost_guard.record_cost(cost_delta / max(rounds_used, 1))
+            cost_actions = _cost_guard.check(shared.state.global_cost_usd)
+            for action in cost_actions:
+                if action.startswith("warn:"):
+                    notify(f"COST WARNING: session spending passed {action[5:]}", level="warning")
+                elif action == "pause_all":
+                    notify(f"COST LIMIT: session budget ${_cost_guard.session_budget_usd:.2f} exceeded -- pausing all agents", level="error")
+                    agent.transition(AgentState.PAUSED)
+                    if bus:
+                        bus.post(display_name, f"Session budget exceeded (${shared.state.global_cost_usd:.2f}/${_cost_guard.session_budget_usd:.2f})", kind="status")
+                    break
+                elif action.startswith("rate_alarm:"):
+                    notify(f"COST RATE ALARM: spending {action[11:]} -- consider pausing agents", level="warning")
+            if agent.state == AgentState.PAUSED:
+                break
 
             if not agent.check_budget():
                 agent.transition(AgentState.PAUSED)
@@ -678,9 +753,10 @@ PLANNING (MANDATORY):
                     if deviation:
                         result_str = deviation + "\n" + result_str
 
-                    # -- Record for loop detection and evidence tracking --
+                    # -- Record for loop detection, evidence tracking, and live log --
                     loop_detector.record_tool_call(t_name, t_args, result_str)
                     evidence_tracker.record_tool(rounds_used, t_name, t_args, result_str)
+                    _log_tool_call(agent, t_name, t_args, result_str, rounds_used)
 
                     conversation.append({
                         "role": "tool", "tool_call_id": tc_d["id"],
@@ -698,9 +774,10 @@ PLANNING (MANDATORY):
                     if deviation:
                         result_str = deviation + "\n" + result_str
 
-                    # -- Record for loop detection and evidence tracking --
+                    # -- Record for loop detection, evidence tracking, and live log --
                     loop_detector.record_tool_call(tool_name, args, result_str)
                     evidence_tracker.record_tool(rounds_used, tool_name, args, result_str)
+                    _log_tool_call(agent, tool_name, args, result_str, rounds_used)
 
                     conversation.append({
                         "role": "tool", "tool_call_id": tc_d["id"],
@@ -747,11 +824,24 @@ PLANNING (MANDATORY):
                 elif loop_escalation_count == 1:
                     # First escalation: upgrade model to hardcore for better reasoning
                     model_escalated = True
+                    # Record the error for potential lesson learning
+                    if loop_detector.test_failures:
+                        loop_error_at_escalation = loop_detector.test_failures[-1]
+                    elif loop_detector.edit_targets:
+                        loop_error_at_escalation = f"repeated edits to {list(loop_detector.edit_targets.keys())[-1]}"
+                    # Check lessons DB for relevant prior solutions
+                    relevant = lessons_db.find_relevant(
+                        error_signature=loop_error_at_escalation,
+                        files=list(loop_detector.edit_targets.keys()),
+                    )
+                    lesson_hint = ""
+                    if relevant:
+                        lesson_hint = "\n\n" + lessons_db.format_for_prompt(relevant)
                     shared._log(f"agent {display_name}: escalating to hardcore model after loop detection")
                     notify(f"[{display_name}] Escalating to hardcore model after loop detection", level="warning")
                     conversation.append({
                         "role": "user",
-                        "content": f"[SYSTEM] {loop_msg}\n\n[MODEL ESCALATED] You are now running on a more powerful reasoning model. Use this opportunity to think more carefully about the problem.",
+                        "content": f"[SYSTEM] {loop_msg}\n\n[MODEL ESCALATED] You are now running on a more powerful reasoning model. Use this opportunity to think more carefully about the problem.{lesson_hint}",
                     })
                 else:
                     # Second escalation: warn harder
@@ -858,6 +948,22 @@ PLANNING (MANDATORY):
         if bus:
             bus.post(display_name, report, kind="result")
         agent.transition(AgentState.DONE)
+
+        # -- Cross-session learning: record lesson if we recovered from a loop --
+        if loop_escalation_count > 0 and ev_summary.get("last_test_status") == "PASS":
+            # Agent hit a loop but eventually succeeded — record what worked
+            fix_desc = full_output[-500:] if full_output else "Unknown fix"
+            files_involved = list(loop_detector.edit_targets.keys())
+            try:
+                lessons_db.record_lesson(
+                    error_signature=loop_error_at_escalation,
+                    fix_description=fix_desc,
+                    files_involved=files_involved,
+                    expert=data['name'],
+                )
+                shared._log(f"agent {display_name}: recorded lesson for '{loop_error_at_escalation[:50]}'")
+            except Exception:
+                pass  # best-effort
 
         # Completion notification
         test_status = ev_summary.get("last_test_status", "never_run")

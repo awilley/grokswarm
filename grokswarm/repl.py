@@ -286,6 +286,7 @@ def _show_help():
         ("/approve <agent>", "Approve an agent's plan (transition to execution)"),
         ("/reject <agent> <feedback>", "Reject plan and send feedback"),
         ("/tasks", "Show orchestrator task DAG with dependencies"),
+        ("/budget [amount]", "Set/view session cost limit (e.g., /budget 5.00)"),
         ("/experts", "List available experts"),
         ("/skills", "List available skills"),
         ("/context", "Show project context (refresh to rescan)"),
@@ -1056,7 +1057,15 @@ async def _chat_async(session_name: str | None = None):
                             else:
                                 targets = dict(shared.state.agents)
                             for aname, agent in targets.items():
-                                ptable = Table(title=f"[bold cyan]{aname}[/bold cyan] [dim]({agent.state.value})[/dim]", border_style="dim", width=80)
+                                # Agent status header
+                                model_short = (agent.current_model or "?").split("-")[-1][:20]
+                                cache_pct = f"{(agent.cached_tokens_total / max(agent.tokens_used, 1)) * 100:.0f}%" if agent.tokens_used else "n/a"
+                                shared.console.print(f"\n[bold cyan]{aname}[/bold cyan] [dim]({agent.state.value})[/dim]  "
+                                                     f"phase={agent.phase}  model={model_short}  "
+                                                     f"cost=${agent.cost_usd:.4f}  tokens={agent.tokens_used:,}  cache={cache_pct}")
+
+                                # Plan table
+                                ptable = Table(border_style="dim", width=80, show_header=True)
                                 ptable.add_column("#", width=3, justify="right")
                                 ptable.add_column("Status", width=12)
                                 ptable.add_column("Step", width=58)
@@ -1069,6 +1078,13 @@ async def _chat_async(session_name: str | None = None):
                                 else:
                                     ptable.add_row("", "", "[dim]No plan yet[/dim]")
                                 shared.console.print(ptable)
+
+                                # Recent tool calls
+                                if agent.tool_call_log:
+                                    shared.console.print("[dim]Recent tool calls:[/dim]")
+                                    for entry in agent.tool_call_log[-5:]:
+                                        result_short = entry['result'][:80]
+                                        shared.console.print(f"  [dim]R{entry['round']}[/dim] [bold]{entry['tool']}[/bold] {entry['args']}  [dim]{result_short}[/dim]")
                         else:
                             shared.console.print("[dim]No agents active.[/dim]")
                     elif cmd == "pause":
@@ -1142,6 +1158,26 @@ async def _chat_async(session_name: str | None = None):
                             shared.console.print(task_table)
                         else:
                             shared.console.print("[dim]No task DAG active. Use /swarm to start one.[/dim]")
+                    elif cmd == "budget":
+                        from grokswarm.agents import _cost_guard
+                        if arg and arg.strip():
+                            try:
+                                budget_val = float(arg.strip().lstrip("$"))
+                                _cost_guard.set_budget(budget_val)
+                                shared.state.session_cost_budget_usd = budget_val
+                                shared.console.print(f"[swarm.accent]Session budget set to ${budget_val:.2f}[/swarm.accent]")
+                            except ValueError:
+                                shared.console.print("[swarm.warning]Usage: /budget <amount> (e.g., /budget 5.00)[/swarm.warning]")
+                        else:
+                            current = _cost_guard.session_budget_usd
+                            rate = _cost_guard.get_rate_per_min()
+                            shared.console.print(f"  [bold]Session budget:[/bold]  {'$' + f'{current:.2f}' if current > 0 else 'unlimited'}")
+                            shared.console.print(f"  [bold]Session spent:[/bold]   ${shared.state.global_cost_usd:.4f}")
+                            shared.console.print(f"  [bold]Spending rate:[/bold]   ${rate:.4f}/min")
+                            if current > 0:
+                                remaining = max(0, current - shared.state.global_cost_usd)
+                                shared.console.print(f"  [bold]Remaining:[/bold]       ${remaining:.4f}")
+
                     elif cmd == "self-improve":
                         if not arg:
                             shared.console.print("[swarm.warning]Usage: /self-improve <description of improvement>[/swarm.warning]")

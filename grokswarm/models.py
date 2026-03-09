@@ -33,6 +33,10 @@ class AgentInfo:
     phase: str = "planning"  # "planning" | "executing" | "verifying"
     approved_plan: list[dict] | None = None  # frozen copy of approved plan
     plan_files_allowed: set[str] = field(default_factory=set)  # files agent declared it would touch
+    # Live visibility: rolling log of recent tool calls
+    tool_call_log: list[dict] = field(default_factory=list)  # [{tool, args_summary, result_preview, round}]
+    current_model: str = ""  # model being used this round
+    cached_tokens_total: int = 0  # total cached tokens for this agent
 
     def transition(self, new_state: AgentState):
         self.state = new_state
@@ -74,6 +78,7 @@ class SwarmState:
     global_tokens_used: int = 0
     global_cost_budget_usd: float = 0.0
     global_cost_usd: float = 0.0
+    session_cost_budget_usd: float = 0.0  # 0 = no limit; set via /budget
     project_prompt_tokens: int = 0
     project_completion_tokens: int = 0
     project_cached_tokens: int = 0
