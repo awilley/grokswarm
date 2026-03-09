@@ -2,6 +2,7 @@
 
 import os
 import re
+import sys
 import asyncio
 import atexit
 import typer
@@ -16,6 +17,16 @@ from prompt_toolkit.history import FileHistory
 from grokswarm.models import SwarmState
 
 load_dotenv()
+
+# Ensure UTF-8 output on Windows to prevent UnicodeEncodeError with emoji/symbols
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONUTF8", "1")
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 # -- Theme & Console --
 SWARM_THEME = Theme({
@@ -270,17 +281,21 @@ async def _api_call_with_retry(call_fn, label: str = "API call"):
             raise
         except Exception as e:
             last_error = e
-            if isinstance(e, UnicodeEncodeError):
-                raise
             err_str = str(e).lower()
             if any(k in err_str for k in ("401", "403", "invalid_api_key", "authentication")):
                 raise
             if attempt < MAX_API_RETRIES - 1:
                 wait = RETRY_BACKOFF[attempt]
-                console.print(f"  [swarm.warning]\u26a0 {label} failed (attempt {attempt + 1}/{MAX_API_RETRIES}): {type(e).__name__}: {str(e)[:100]}[/swarm.warning]")
-                console.print(f"  [swarm.dim]  retrying in {wait}s...[/swarm.dim]")
+                try:
+                    console.print(f"  [swarm.warning]WARNING: {label} failed (attempt {attempt + 1}/{MAX_API_RETRIES}): {type(e).__name__}: {str(e)[:100]}[/swarm.warning]")
+                    console.print(f"  [swarm.dim]  retrying in {wait}s...[/swarm.dim]")
+                except UnicodeEncodeError:
+                    pass
                 await asyncio.sleep(wait)
             else:
-                console.print(f"  [swarm.error]\u2718 {label} failed after {MAX_API_RETRIES} attempts: {e}[/swarm.error]")
+                try:
+                    console.print(f"  [swarm.error]FAILED: {label} failed after {MAX_API_RETRIES} attempts: {e}[/swarm.error]")
+                except UnicodeEncodeError:
+                    pass
                 raise
     raise last_error
