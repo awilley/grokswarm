@@ -39,6 +39,9 @@ def team_run(name: str, task_desc: str):
         shared.console.print(f"[red]Team {name} not found.[/red]")
         return
     data = yaml.safe_load(team_file.read_text())
+    if not isinstance(data, dict) or "name" not in data:
+        shared.console.print(f"[red]Invalid team file {team_file}: must have 'name' field.[/red]")
+        return
     shared.console.print(f"[bold cyan]Running Team:[/bold cyan] {data['name']}")
     bus = get_bus()
     bus.clear()

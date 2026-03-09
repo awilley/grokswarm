@@ -5,10 +5,14 @@ import sys
 import yaml
 import sqlite3
 import asyncio
+import threading
 from datetime import datetime
 from pathlib import Path
 
 import subprocess
+
+# Lock for thread-safe cost/token updates when multiple agents run concurrently
+_cost_lock = threading.Lock()
 
 import grokswarm.shared as shared
 from grokswarm.models import AgentState
@@ -165,16 +169,17 @@ def _extract_cached_tokens(usage) -> int:
 def _record_usage(model: str, prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0):
     get_bus().log_usage(model, prompt_tokens, completion_tokens, cached_tokens)
     inp_rate, cached_rate, out_rate = shared._get_pricing(model)
-    shared.state.project_prompt_tokens += prompt_tokens
-    shared.state.project_completion_tokens += completion_tokens
-    shared.state.project_cached_tokens += cached_tokens
-    # Cached tokens are charged at the lower cached rate
     non_cached = max(0, prompt_tokens - cached_tokens)
-    shared.state.project_cost_usd += (
+    cost = (
         (non_cached / 1_000_000.0) * inp_rate
         + (cached_tokens / 1_000_000.0) * cached_rate
         + (completion_tokens / 1_000_000.0) * out_rate
     )
+    with _cost_lock:
+        shared.state.project_prompt_tokens += prompt_tokens
+        shared.state.project_completion_tokens += completion_tokens
+        shared.state.project_cached_tokens += cached_tokens
+        shared.state.project_cost_usd += cost
     try:
         _save_project_costs()
     except OSError:
@@ -238,7 +243,7 @@ def _auto_checkpoint_before_agent(display_name: str):
         if result.returncode != 0 or not result.stdout.strip():
             return  # not a git repo or no changes
         subprocess.run(
-            ["git", "add", "-A"],
+            ["git", "add", "-u"],  # Only tracked files — avoids committing .env/secrets
             capture_output=True, text=True, cwd=shared.PROJECT_DIR, timeout=10,
         )
         subprocess.run(
@@ -388,12 +393,30 @@ PLANNING (MANDATORY):
 - The user monitors your plan in real-time. Keep it accurate."""
 
 
+def _validate_expert_yaml(data: dict, filepath: str) -> str | None:
+    """Validate expert YAML structure. Returns error message or None if valid."""
+    if not isinstance(data, dict):
+        return f"Expert file {filepath}: expected a YAML mapping, got {type(data).__name__}"
+    missing = [f for f in ("name", "mindset") if f not in data]
+    if missing:
+        return f"Expert file {filepath}: missing required field(s): {', '.join(missing)}"
+    if "temperature" in data and not isinstance(data["temperature"], (int, float)):
+        return f"Expert file {filepath}: 'temperature' must be a number, got {type(data['temperature']).__name__}"
+    if "max_rounds" in data and not isinstance(data["max_rounds"], int):
+        return f"Expert file {filepath}: 'max_rounds' must be an integer, got {type(data['max_rounds']).__name__}"
+    return None
+
+
 async def run_expert(name: str, task_desc: str, bus: SwarmBus | None = None, agent_name: str | None = None):
     expert_file = shared.EXPERTS_DIR / f"{name.lower()}.yaml"
     if not expert_file.exists():
         shared.console.print(f"[red]Expert {name} not found.[/red]")
         return ""
     data = yaml.safe_load(expert_file.read_text())
+    err = _validate_expert_yaml(data, str(expert_file))
+    if err:
+        shared.console.print(f"[red]{err}[/red]")
+        return ""
     expert_temperature = data.get("temperature")
     max_rounds = data.get("max_rounds", EXPERT_DEFAULT_MAX_ROUNDS)
     display_name = agent_name or name
@@ -509,14 +532,16 @@ Rules:
             if pt or ct:
                 _record_usage(round_model, pt, ct, cached)
                 agent.add_usage(pt, ct, round_model, cached)
-                shared.state.global_tokens_used += pt + ct
                 _inp_r, _cached_r, _out_r = shared._get_pricing(round_model)
                 non_cached = max(0, pt - cached)
-                shared.state.global_cost_usd += (
+                _global_cost = (
                     (non_cached / 1_000_000.0) * _inp_r
                     + (cached / 1_000_000.0) * _cached_r
                     + (ct / 1_000_000.0) * _out_r
                 )
+                with _cost_lock:
+                    shared.state.global_tokens_used += pt + ct
+                    shared.state.global_cost_usd += _global_cost
                 agent.cached_tokens_total += cached
 
             # Guardrail: cost limits
