@@ -227,7 +227,8 @@ LINT_COMMANDS: dict[str, list[str]] = {
 }
 
 
-def _lint_file(path: Path) -> str | None:
+def _lint_file(path: Path | str) -> str | None:
+    path = Path(path) if isinstance(path, str) else path
     ext = path.suffix.lower()
     base_cmd = LINT_COMMANDS.get(ext)
     if not base_cmd:

@@ -411,7 +411,8 @@ def _validate_expert_yaml(data: dict, filepath: str) -> str | None:
 
 
 async def run_expert(name: str, task_desc: str, bus: SwarmBus | None = None,
-                     agent_name: str | None = None, workspace_dir: Path | None = None):
+                     agent_name: str | None = None, workspace_dir: Path | None = None,
+                     is_sub_agent: bool = False):
     expert_file = shared.EXPERTS_DIR / f"{name.lower()}.yaml"
     if not expert_file.exists():
         shared.console.print(f"[red]Expert {name} not found.[/red]")
@@ -498,7 +499,8 @@ Rules:
     tool_actions: list[str] = []
 
     # -- Initialize guardrail pipeline (all guardrail state lives here) --
-    gp = GuardrailPipeline(agent, display_name, task_desc, data, bus)
+    gp = GuardrailPipeline(agent, display_name, task_desc, data, bus,
+                           is_sub_agent=is_sub_agent)
     gp.setup(conversation)
     agent_tools = gp.get_tool_schemas()
 

@@ -426,7 +426,7 @@ RULES:
                     if deliverable.endswith(".py"):
                         try:
                             from grokswarm.tools_test import _lint_file
-                            lint_err = _lint_file(str(full_path))
+                            lint_err = _lint_file(full_path)
                             if lint_err:
                                 issues.append(f"'{deliverable}' has syntax errors: {lint_err[:200]}")
                         except ImportError:
@@ -555,6 +555,7 @@ RULES:
                     agent_name=agent_name,
                     bus=bus,
                     workspace_dir=workspace,
+                    is_sub_agent=True,
                 )
                 tasks.append((subtask, asyncio.create_task(task_coro)))
 
@@ -1094,12 +1095,13 @@ class GuardrailPipeline:
     """
 
     def __init__(self, agent, display_name: str, task_desc: str,
-                 expert_data: dict, bus=None):
+                 expert_data: dict, bus=None, is_sub_agent: bool = False):
         self.agent = agent
         self.display_name = display_name
         self.task_desc = task_desc
         self.expert_data = expert_data
         self.bus = bus
+        self.is_sub_agent = is_sub_agent
 
         # Sub-systems
         self.loop_detector = LoopDetector()
@@ -1116,8 +1118,12 @@ class GuardrailPipeline:
         self._is_simple_task = False
         self._step_notified: set[str] = set()
 
-        # Model routing
-        self.planning_model = ToolFilter.get_model_for_phase(expert_data, "planning")
+        # Model routing — sub-agents use reasoning for planning (task already
+        # well-defined by orchestrator decomposition, no need for expensive hardcore)
+        if is_sub_agent:
+            self.planning_model = MODEL_ROUTING["reasoning"]
+        else:
+            self.planning_model = ToolFilter.get_model_for_phase(expert_data, "planning")
         self.execution_model = ToolFilter.get_model_for_phase(expert_data, "executing")
         self.escalation_model = ToolFilter.get_model_for_escalation()
 
