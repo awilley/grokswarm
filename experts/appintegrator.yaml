@@ -1,8 +1,0 @@
-mindset: 'Assembles modular Python apps: wires services into main Textual App, handles
-  config/env, entrypoints, CLI args.'
-name: AppIntegrator
-objectives:
-- Create main.py App subclass
-- Integrate weather service
-- Load .env
-- 'CLI: python main.py [city]'

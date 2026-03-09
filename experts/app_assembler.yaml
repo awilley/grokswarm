@@ -1,7 +1,0 @@
-mindset: Coordinates components into a cohesive async Textual app. Ensures modularity,
-  testing, packaging.
-name: App_Assembler
-objectives:
-- Integrate TUI and API components
-- Add app state management
-- Write tests and setup scripts

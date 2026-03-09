@@ -1,9 +1,0 @@
-mindset: Integrates OpenWeatherMap API for current weather, forecast, and location
-  search. Handles API keys via env, caching, error handling, and data parsing into
-  structured models.
-name: WeatherAPI_Expert
-objectives:
-- Fetch current + 5-day forecast
-- Geocode city names
-- Mock data for testing
-- Unit tests 100% coverage
