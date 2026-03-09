@@ -555,6 +555,23 @@ def build_system_prompt(project_context: dict | None = None) -> str:
                    "Use this for self-reference — understanding your own capabilities, reviewing your implementation, "
                    "or when asked about how you work. All @grokswarm/ access is read-only.\n"
                    "--- END SELF-KNOWLEDGE ---")
+    # Planning instructions
+    if shared.state.planning_mode:
+        prompt += (
+            "\n\n--- PLANNING MODE (ENFORCED) ---\n"
+            "Planning mode is ON. You MUST call update_plan as your FIRST action to outline your steps.\n"
+            "Write tools (edit_file, write_file, run_shell, git_commit, etc.) are BLOCKED until you submit a plan.\n"
+            "Read-only tools (read_file, list_directory, grep_files, etc.) are available during planning.\n"
+            "After your plan is submitted and approved, all tools unlock and you can execute.\n"
+            "As you complete each step, call update_plan again with the step's status set to 'done'.\n"
+            "--- END PLANNING MODE ---"
+        )
+    else:
+        prompt += (
+            "\n\nPLANNING TOOL: update_plan\n"
+            "For multi-step tasks, consider calling update_plan to outline your steps before making changes. "
+            "The user can see your plan progress in real-time. This is optional but recommended for complex work."
+        )
     return prompt
 
 

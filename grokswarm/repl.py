@@ -45,6 +45,7 @@ from grokswarm.cmd_handlers import (
     handle_eval, handle_self_improve, handle_daemon, handle_self_eval,
     handle_vim, handle_history, handle_self_scores,
     handle_diff, handle_copy, handle_claude, handle_delib,
+    handle_plan,
 )
 
 # ---------------------------------------------------------------------------
@@ -104,6 +105,7 @@ _cmd("diff",         "Show session file changes as diff")(handle_diff)
 _cmd("copy",         "Copy last response to clipboard")(handle_copy)
 _cmd("claude",       "Toggle Claude Code executor mode")(handle_claude)
 _cmd("delib",        "View dualhead deliberation log",    aliases=["deliberation"])(handle_delib)
+_cmd("plan",         "Toggle enforced planning mode")(handle_plan)
 # fmt: on
 
 # -- Context-Aware Tab Completion --
@@ -991,12 +993,27 @@ async def _chat_async(session_name: str | None = None):
         vi_tag = " <ansicyan>[VI]</ansicyan>" if getattr(shared.state, 'vi_mode', False) else ""
         claude_tag = " <ansimagenta>[CLAUDE]</ansimagenta>" if getattr(shared.state, 'claude_mode', False) else ""
         dualhead_tag = " <ansimagenta>[DUALHEAD]</ansimagenta>" if getattr(shared.state, 'dualhead_mode', False) else ""
+        # Session plan progress
+        plan_tag = ""
+        if getattr(shared.state, 'planning_mode', False):
+            plan_tag = " <ansicyan>[PLAN]</ansicyan>"
+        plan_progress = ""
+        s_plan = getattr(shared.state, 'session_plan', [])
+        s_phase = getattr(shared.state, 'session_plan_phase', 'idle')
+        if s_plan and s_phase != "idle":
+            p_done = sum(1 for s in s_plan if s.get("status") == "done")
+            p_total = len(s_plan)
+            p_bar_w = 10
+            p_filled = int(p_bar_w * p_done / p_total) if p_total else 0
+            p_bar = "\u2501" * p_filled + "\u2578" + "\u2500" * max(0, p_bar_w - p_filled - 1)
+            p_label = "Planning" if s_phase == "planning" else "Executing"
+            plan_progress = f" <ansidarkgray>|</ansidarkgray> <ansicyan>{p_label} [{p_bar}] {p_done}/{p_total}</ansicyan>"
         parts.append(
             f"  <ansidarkgray>{proj_name}</ansidarkgray>"
             f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{model_short}</ansidarkgray>"
             f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{tok_str} tok</ansidarkgray>"
             f" <ansidarkgray>|</ansidarkgray> <ansidarkgray>{cost_str}</ansidarkgray>"
-            f"{ctx_tag}{vi_tag}{claude_tag}{dualhead_tag}"
+            f"{ctx_tag}{vi_tag}{claude_tag}{dualhead_tag}{plan_tag}{plan_progress}"
             f" <ansidarkgray>|</ansidarkgray> <ansimagenta>\u25b6\u25b6</ansimagenta> {mode_str}"
         )
         return HTML("\n".join(parts))

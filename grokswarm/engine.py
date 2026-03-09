@@ -13,7 +13,9 @@ from grokswarm.context import _safe_path, _incremental_context_refresh
 from grokswarm.tools_registry import (
     TOOL_SCHEMAS, TOOL_DISPATCH, READ_ONLY_TOOLS,
     _FILE_MUTATION_TOOLS, _READONLY_BLOCKED_TOOLS,
+    get_session_tool_schemas,
 )
+from grokswarm.guardrails import PlanGate, TaskComplexity
 from grokswarm.tools_test import _lint_file, _run_tests_raw, _detect_test_framework, TEST_COMMANDS, MAX_TEST_FIX_ATTEMPTS
 
 MAX_TOOL_ROUNDS = 10
@@ -481,13 +483,56 @@ def _tool_detail(name: str, args: dict) -> str:
     return ""
 
 
+def _display_session_plan(plan: list[dict]) -> None:
+    """Render the session plan as a Rich Panel with status indicators."""
+    from rich.panel import Panel
+    lines = []
+    for s in plan:
+        status = s.get("status", "pending")
+        if status == "done":
+            icon = "[green]\u2713[/green]"
+        elif status == "in-progress":
+            icon = "[cyan]\u25b6[/cyan]"
+        elif status == "skipped":
+            icon = "[dim]\u2013[/dim]"
+        else:
+            icon = "[dim]\u25cb[/dim]"
+        lines.append(f"  {icon} {s.get('step', '?')}")
+    shared.console.print(Panel("\n".join(lines), title="Plan", border_style="cyan", expand=False))
+
+
 async def _stream_with_tools(conversation: list) -> str:
     from grokswarm.agents import _record_usage
     from grokswarm import llm
     full_response = ""
     total_prompt_tokens = 0
     total_completion_tokens = 0
-    xai_tools = llm.convert_tools(TOOL_SCHEMAS)
+
+    # -- Session planning setup --
+    _plan_active = False      # True if update_plan tool should be included
+    _plan_enforced = False    # True if write tools are blocked until plan submitted
+
+    if shared.state.planning_mode:
+        _plan_active = True
+        _plan_enforced = True
+        if shared.state.session_plan_phase == "idle":
+            shared.state.session_plan_phase = "planning"
+            shared.state.session_plan.clear()
+    elif shared.state.agent_mode == 0:
+        # Advisory mode: include update_plan for complex tasks without blocking
+        last_user = ""
+        for m in reversed(conversation):
+            if m.get("role") == "user":
+                content = m.get("content", "")
+                if isinstance(content, str) and content.strip():
+                    last_user = content
+                    break
+        if last_user and not TaskComplexity.should_skip_planning(last_user):
+            _plan_active = True
+
+    tool_schemas = get_session_tool_schemas(include_plan_tool=_plan_active)
+    xai_tools = llm.convert_tools(tool_schemas)
+
     for _round in range(MAX_TOOL_ROUNDS):
         if shared._cancel_event.is_set():
             shared.console.print("\n  [swarm.warning]\u23ce Interrupted.[/swarm.warning]")
@@ -630,6 +675,31 @@ async def _stream_with_tools(conversation: list) -> str:
                     continue
             parsed_tools.append((tc, name, args))
 
+        # -- Session plan-phase gating --
+        _blocked_tools: list[tuple[dict, str]] = []  # (tc, blocked_msg) for tools blocked during planning
+        if _plan_enforced and shared.state.session_plan_phase == "planning":
+            remaining: list[tuple[dict, str, dict]] = []
+            for tc, name, args in parsed_tools:
+                if name == "update_plan":
+                    # Inject session_mode flag so dispatch stores in shared.state
+                    if shared.state.agent_mode == 0:
+                        args["_session_mode"] = True
+                    remaining.append((tc, name, args))
+                elif name not in PlanGate.PLAN_PHASE_TOOLS:
+                    _blocked_tools.append((tc, f"[BLOCKED] Tool '{name}' not available during planning phase. "
+                                           "Submit your plan first using update_plan, then tools will be unlocked."))
+                else:
+                    remaining.append((tc, name, args))
+            # Emit blocked tool results
+            for tc, msg in _blocked_tools:
+                conversation.append({"role": "tool", "tool_call_id": tc["id"], "content": msg})
+            parsed_tools = remaining
+        elif _plan_active and shared.state.agent_mode == 0:
+            # Advisory mode — inject _session_mode for update_plan calls
+            for tc, name, args in parsed_tools:
+                if name == "update_plan":
+                    args["_session_mode"] = True
+
         # Determine threadable set for this round
         if shared.state.trust_mode or shared.state.agent_mode > 0:
             _round_threadable = _THREADABLE_TOOLS_TRUSTED
@@ -731,4 +801,35 @@ async def _stream_with_tools(conversation: list) -> str:
                     })
             return full_response
 
+        # -- Session plan display and phase transitions --
+        if _plan_active and shared.state.session_plan:
+            _had_update_plan = any(n == "update_plan" for _, n, _ in parsed_tools)
+            if _had_update_plan:
+                _display_session_plan(shared.state.session_plan)
+
+                if shared.state.session_plan_phase == "planning" and shared.state.session_plan:
+                    # Plan submitted during enforced planning — transition to executing
+                    if shared.state.dualhead_mode:
+                        from grokswarm.guardrails import deliberate_on_session_plan
+                        # Extract user prompt for context
+                        _user_prompt = ""
+                        for _m in reversed(conversation):
+                            if _m.get("role") == "user":
+                                _c = _m.get("content", "")
+                                if isinstance(_c, str) and _c.strip() and not _c.startswith("["):
+                                    _user_prompt = _c
+                                    break
+                        approved = await deliberate_on_session_plan(
+                            shared.state.session_plan, _user_prompt, conversation
+                        )
+                        if not approved:
+                            shared.state.session_plan_phase = "planning"
+                        else:
+                            shared.state.session_plan_phase = "executing"
+                    else:
+                        shared.state.session_plan_phase = "executing"
+
+    # Reset phase when done
+    if _plan_enforced or _plan_active:
+        shared.state.session_plan_phase = "idle"
     return full_response

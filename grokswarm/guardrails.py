@@ -1043,6 +1043,70 @@ class Deliberator:
 
 
 # ---------------------------------------------------------------------------
+# Session-Level Dualhead Deliberation (for /plan mode)
+# ---------------------------------------------------------------------------
+
+async def deliberate_on_session_plan(plan: list[dict], user_prompt: str, conversation: list[dict]) -> bool:
+    """Send the session plan to Claude for review when dualhead_mode is on.
+
+    Returns True if approved, False if rejected (caller should revert to planning).
+    """
+    if not plan:
+        return True
+
+    plan_text = "\n".join(f"{i+1}. {s.get('step', s)}" for i, s in enumerate(plan))
+    formatted = (
+        f"## Session Plan\n"
+        f"## User prompt: {user_prompt[:500]}\n\n"
+        f"**Plan ({len(plan)} steps):**\n{plan_text}"
+    )
+
+    reviewer = ClaudeReviewer()
+    deliberator = Deliberator(reviewer)
+    project_summary = deliberator._build_project_summary()
+
+    prompt = reviewer.build_review_prompt(
+        formatted, project_summary, Deliberator.CAPABILITIES, []
+    )
+
+    notify("Dualhead: sending session plan to Claude for review")
+    shared._set_status("dualhead deliberating... reviewing session plan")
+    shared.console.print(
+        "\n[bold green]\\[Grok → Claude][/bold green] "
+        "Reviewing session plan..."
+    )
+
+    feedback = await reviewer.review(prompt)
+    approved = ExternalReviewer.parse_approval(feedback)
+
+    rnd = DeliberationRound(round_num=1, grok_plan=formatted,
+                            reviewer_feedback=feedback, approved=approved)
+    shared.state.deliberation_log.append(rnd)
+    shared._clear_status()
+
+    label = "APPROVED" if approved else "FEEDBACK"
+    color = "green" if approved else "yellow"
+    shared.console.print(
+        f"[bold {color}]\\[Claude → Grok][/bold {color}] {label}"
+    )
+    display_fb = feedback[:800] + "..." if len(feedback) > 800 else feedback
+    shared.console.print(f"[dim]{display_fb}[/dim]")
+
+    if not approved:
+        conversation.append({
+            "role": "user",
+            "content": (
+                "[DUALHEAD REVIEW] An external reviewer (Claude) has feedback on your plan:\n\n"
+                f"{feedback}\n\n"
+                "Revise your plan with update_plan to address this feedback, then proceed."
+            ),
+        })
+        shared._log("session plan: dualhead review — sent back to planning")
+
+    return approved
+
+
+# ---------------------------------------------------------------------------
 # Feature 9: Cross-Session Learning (LessonsDB)
 # ---------------------------------------------------------------------------
 
