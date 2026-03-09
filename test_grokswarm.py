@@ -1967,6 +1967,56 @@ class TestTaskComplexity:
     def test_should_skip_planning_complex(self):
         assert TaskComplexity.should_skip_planning("refactor the entire database layer") is False
 
+    # -- should_decompose tests --
+
+    def test_should_decompose_simple_task(self):
+        """Simple tasks should never decompose."""
+        assert TaskComplexity.should_decompose("fix a typo in config") is False
+
+    def test_should_decompose_complex_but_single_deliverable(self):
+        """Complex task without multi-deliverable signals should not decompose (e.g., E1 calculator)."""
+        e1_prompt = (
+            "Create a command-line calculator calc.py that uses argparse with subcommands: "
+            "add, sub, mul, div. Each subcommand takes two float arguments: a and b. "
+            "Prints the result to stdout. Division by zero prints Error and exits with code 1. "
+            "Supports negative numbers and returns exit code 0 on success."
+        )
+        assert TaskComplexity.should_decompose(e1_prompt) is False
+
+    def test_should_decompose_multiple_modules(self):
+        """Task mentioning multiple independent modules should decompose."""
+        assert TaskComplexity.should_decompose(
+            "Implement and build a new complete system with multiple independent modules "
+            "for handling data processing, validation, and transformation with tests for each"
+        ) is True
+
+    def test_should_decompose_four_independent(self):
+        """Task with 'four independent ... modules' should decompose (e.g., E2)."""
+        # Uses real E2-like prompt: >30 words → complex, "four independent" → multi-deliverable
+        assert TaskComplexity.should_decompose(
+            "Create four independent Python processor modules, each with its own test file. "
+            "These are four separate, independent modules with no shared dependencies between them. "
+            "1. csv_processor.py with parse_csv, filter_rows, to_csv functions. "
+            "2. text_processor.py with word_frequency, find_longest_word, truncate functions."
+        ) is True
+
+    def test_should_decompose_three_separate(self):
+        """Task with 'three separate ... components' should decompose (e.g., F1)."""
+        assert TaskComplexity.should_decompose(
+            "Create three separate independent utility modules with tests: "
+            "1. string_utils.py with reverse_string, is_palindrome, count_words. "
+            "2. math_utils.py with factorial, is_prime, gcd. "
+            "3. file_utils.py with count_lines, find_files, read_json. Run all tests to verify."
+        ) is True
+
+    def test_should_decompose_several_files(self):
+        """Task mentioning several files should decompose."""
+        assert TaskComplexity.should_decompose(
+            "Implement a new complete authentication system with several independent components "
+            "for token validation, session management, role checking, and password hashing. "
+            "Each component should be a separate module with its own test suite."
+        ) is True
+
 
 # ---------------------------------------------------------------------------
 # LessonsDB tests

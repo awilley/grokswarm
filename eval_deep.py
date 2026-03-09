@@ -613,6 +613,85 @@ TASK_E1 = DeepEvalTask(
     ],
 )
 
+# -- E2: Four Independent Processor Modules (Parallel-Friendly Comparison) --
+
+TASK_E2 = DeepEvalTask(
+    id="E2",
+    category="E",
+    description="Four independent processor modules — parallel-friendly comparison",
+    task_prompt=textwrap.dedent("""\
+        Create four independent Python processor modules, each with its own test file.
+        These are four separate, independent modules with no shared dependencies between them.
+
+        1. `csv_processor.py` with functions:
+           - parse_csv(text: str) -> list[list[str]]  (split lines by comma, strip whitespace)
+           - filter_rows(rows: list[list[str]], column: int, value: str) -> list[list[str]]
+           - to_csv(rows: list[list[str]]) -> str  (join back to CSV text)
+           Create `test_csv_processor.py` with at least 4 tests.
+
+        2. `text_processor.py` with functions:
+           - word_frequency(text: str) -> dict[str, int]  (case-insensitive)
+           - find_longest_word(text: str) -> str
+           - truncate(text: str, max_len: int) -> str  (add "..." if truncated)
+           Create `test_text_processor.py` with at least 4 tests.
+
+        3. `json_processor.py` with functions:
+           - flatten(obj: dict, prefix: str = "") -> dict  (flatten nested dicts with dot notation keys)
+           - merge(a: dict, b: dict) -> dict  (deep merge, b overrides a)
+           - extract_keys(obj: dict, keys: list[str]) -> dict  (pick only listed keys)
+           Create `test_json_processor.py` with at least 4 tests.
+
+        4. `date_processor.py` with functions:
+           - parse_date(s: str) -> datetime.date  (accept "YYYY-MM-DD" format)
+           - days_between(a: str, b: str) -> int  (absolute difference)
+           - add_days(date_str: str, n: int) -> str  (return "YYYY-MM-DD")
+           Create `test_date_processor.py` with at least 4 tests.
+
+        Run all tests to verify they pass.
+    """),
+    setup_files={},
+    expert="coder",
+    checks=[
+        # csv_processor (correctness)
+        wcheck("csv_exists", check_file_exists("csv_processor.py"), 1.0, "correctness"),
+        wcheck("csv_compiles", check_python_compiles("csv_processor.py"), 1.5, "correctness"),
+        wcheck("has_parse_csv", check_function_exists("csv_processor.py", "parse_csv"), 1.0, "correctness"),
+        wcheck("has_filter_rows", check_function_exists("csv_processor.py", "filter_rows"), 1.0, "correctness"),
+        wcheck("has_to_csv", check_function_exists("csv_processor.py", "to_csv"), 1.0, "correctness"),
+        wcheck("test_csv_exists", check_file_exists("test_csv_processor.py"), 0.5, "completeness"),
+        wcheck("test_csv_pass", check_pytest_passes("test_csv_processor.py"), 2.0, "correctness"),
+        # text_processor (correctness)
+        wcheck("text_exists", check_file_exists("text_processor.py"), 1.0, "correctness"),
+        wcheck("text_compiles", check_python_compiles("text_processor.py"), 1.5, "correctness"),
+        wcheck("has_word_frequency", check_function_exists("text_processor.py", "word_frequency"), 1.0, "correctness"),
+        wcheck("has_find_longest_word", check_function_exists("text_processor.py", "find_longest_word"), 1.0, "correctness"),
+        wcheck("has_truncate", check_function_exists("text_processor.py", "truncate"), 1.0, "correctness"),
+        wcheck("test_text_exists", check_file_exists("test_text_processor.py"), 0.5, "completeness"),
+        wcheck("test_text_pass", check_pytest_passes("test_text_processor.py"), 2.0, "correctness"),
+        # json_processor (correctness)
+        wcheck("json_exists", check_file_exists("json_processor.py"), 1.0, "correctness"),
+        wcheck("json_compiles", check_python_compiles("json_processor.py"), 1.5, "correctness"),
+        wcheck("has_flatten", check_function_exists("json_processor.py", "flatten"), 1.0, "correctness"),
+        wcheck("has_merge", check_function_exists("json_processor.py", "merge"), 1.0, "correctness"),
+        wcheck("has_extract_keys", check_function_exists("json_processor.py", "extract_keys"), 1.0, "correctness"),
+        wcheck("test_json_exists", check_file_exists("test_json_processor.py"), 0.5, "completeness"),
+        wcheck("test_json_pass", check_pytest_passes("test_json_processor.py"), 2.0, "correctness"),
+        # date_processor (correctness)
+        wcheck("date_exists", check_file_exists("date_processor.py"), 1.0, "correctness"),
+        wcheck("date_compiles", check_python_compiles("date_processor.py"), 1.5, "correctness"),
+        wcheck("has_parse_date", check_function_exists("date_processor.py", "parse_date"), 1.0, "correctness"),
+        wcheck("has_days_between", check_function_exists("date_processor.py", "days_between"), 1.0, "correctness"),
+        wcheck("has_add_days", check_function_exists("date_processor.py", "add_days"), 1.0, "correctness"),
+        wcheck("test_date_exists", check_file_exists("test_date_processor.py"), 0.5, "completeness"),
+        wcheck("test_date_pass", check_pytest_passes("test_date_processor.py"), 2.0, "correctness"),
+        # Quality: all modules importable
+        wcheck("csv_importable", check_import_works("csv_processor.py", "csv_processor"), 0.5, "quality"),
+        wcheck("text_importable", check_import_works("text_processor.py", "text_processor"), 0.5, "quality"),
+        wcheck("json_importable", check_import_works("json_processor.py", "json_processor"), 0.5, "quality"),
+        wcheck("date_importable", check_import_works("date_processor.py", "date_processor"), 0.5, "quality"),
+    ],
+)
+
 # -- F1: Three Independent Modules (Parallel Speedup) --
 
 TASK_F1 = DeepEvalTask(
@@ -1130,7 +1209,7 @@ I1_RUN2_CHECKS = [
 ]
 
 # All deep eval tasks
-DEEP_EVAL_TASKS: list[DeepEvalTask] = [TASK_E1, TASK_F1, TASK_G1, TASK_H1, TASK_I1]
+DEEP_EVAL_TASKS: list[DeepEvalTask] = [TASK_E1, TASK_E2, TASK_F1, TASK_G1, TASK_H1, TASK_I1]
 
 
 # ---------------------------------------------------------------------------

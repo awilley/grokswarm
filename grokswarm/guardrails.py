@@ -335,19 +335,22 @@ class EvidenceTracker:
 class Orchestrator:
     """Persistent orchestrator that decomposes, sequences, and validates multi-agent work."""
 
-    DECOMPOSITION_PROMPT = """Break this task into ordered sub-tasks. For each sub-task specify:
+    DECOMPOSITION_PROMPT = """Break this task into sub-tasks for parallel execution where possible.
+
+For each sub-task specify:
 - id: short unique identifier (e.g., "t1", "t2")
 - description: what specifically needs to be done
 - expert: which expert should handle it (from: {experts})
-- depends_on: list of sub-task ids that must complete first (empty list if none)
+- depends_on: list of sub-task ids that must complete first (empty list [] if independent)
 - deliverables: expected output files or verifiable outcomes
 
 Output JSON: {{"subtasks": [...]}}
 
 RULES:
-- Order matters: put foundational work first
+- Maximize parallelism: sub-tasks that don't share files or depend on each other's output should have empty depends_on so they run simultaneously
+- Only add a dependency when a sub-task truly needs another's deliverable
 - Each sub-task should be independently verifiable
-- Include a final verification sub-task that runs tests and checks all deliverables
+- Include a final verification sub-task that depends on all others and runs tests
 - Task: {task}"""
 
     # Model fallback chain for decomposition
@@ -447,7 +450,15 @@ RULES:
         from grokswarm.tools_git import git_worktree_add, git_worktree_remove, _run_git
 
         experts = list_experts()
-        dag = await Orchestrator.decompose(task, experts)
+
+        if TaskComplexity.should_decompose(task):
+            dag = await Orchestrator.decompose(task, experts)
+        else:
+            notify("Orchestrator: fast-path — single-agent execution (no decomposition needed)")
+            best_expert = experts[0] if experts else "assistant"
+            dag = TaskDAG(goal=task, subtasks=[
+                SubTask(id="t1", description=task, expert=best_expert)
+            ])
 
         notify(f"Orchestrator: decomposed into {len(dag.subtasks)} sub-tasks")
         bus.post("orchestrator", json.dumps([asdict(t) for t in dag.subtasks]), kind="plan")
@@ -706,6 +717,24 @@ class TaskComplexity:
     def should_skip_planning(task: str) -> bool:
         """Returns True if the task is simple enough to skip the planning phase."""
         return TaskComplexity.classify(task) == "simple"
+
+    # Signals that a task has multiple independent deliverables worth parallelizing
+    MULTI_DELIVERABLE_SIGNALS = [
+        re.compile(r'\b(multiple|several)\s+(files?|modules?|components?|services?|packages?)', re.I),
+        re.compile(r'\b(three|four|five|six|[3-9])\s+(separate|independent|different|distinct)\s', re.I),
+        re.compile(r'\bindependent(ly)?\b.*\b(modules?|files?|components?)\b', re.I),
+        re.compile(r'\b(modules?|files?|components?)\b.*\bindependent(ly)?\b', re.I),
+    ]
+
+    @staticmethod
+    def should_decompose(task: str) -> bool:
+        """True only if task is complex AND has multi-deliverable signals."""
+        if TaskComplexity.classify(task) != "complex":
+            return False
+        for pat in TaskComplexity.MULTI_DELIVERABLE_SIGNALS:
+            if pat.search(task):
+                return True
+        return False
 
 
 # ---------------------------------------------------------------------------
