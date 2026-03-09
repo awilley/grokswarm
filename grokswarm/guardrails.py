@@ -922,6 +922,7 @@ class GuardrailPipeline:
         self.made_file_mutations = False
         self.ran_tests = False
         self.verification_prompted = False
+        self._is_simple_task = False
         self._step_notified: set[str] = set()
 
         # Model routing
