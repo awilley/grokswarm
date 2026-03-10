@@ -2845,8 +2845,8 @@ class TestDualheadDeliberationV2:
         assert any("3 round(s) remaining" in m["content"] for m in conversation)
 
     @pytest.mark.asyncio
-    async def test_deliberate_feedback_grants_bonus_rounds(self, monkeypatch):
-        """Each rejection grants 2 bonus rounds to compensate for deliberation overhead."""
+    async def test_deliberate_feedback_reverts_to_planning(self, monkeypatch):
+        """Feedback reverts agent to planning phase; no bonus rounds needed since planning is free."""
         gp, agent = self._make_pipeline()
         _shared.state.dualhead_mode = True
         _shared.state.dualhead_max_rounds = 3
@@ -2857,19 +2857,20 @@ class TestDualheadDeliberationV2:
         from grokswarm.guardrails import ClaudeReviewer
         monkeypatch.setattr(ClaudeReviewer, "review", mock_review)
 
-        assert gp.deliberation_bonus_rounds == 0
-
-        # Round 1: feedback → +2 bonus
+        # Round 1: feedback → reverts to planning, round tracked
         conversation = []
         await gp.deliberate_on_agent_plan(conversation)
-        assert gp.deliberation_bonus_rounds == 2
+        assert agent.phase == "planning"
+        assert gp._deliberation_round == 1
+        assert len(gp._deliberation_history) == 1
+        assert gp._deliberation_history[0][2] is False  # not approved
 
-        # Round 2: feedback → +2 more bonus
-        agent.phase = "executing"
+        # Round 2: feedback again → still planning
         agent.plan = [{"step": "Revised plan"}]
         gp._needs_deliberation = True
         await gp.deliberate_on_agent_plan(conversation)
-        assert gp.deliberation_bonus_rounds == 4
+        assert agent.phase == "planning"
+        assert gp._deliberation_round == 2
 
     @pytest.mark.asyncio
     async def test_deliberate_auto_approve_past_total_max(self, monkeypatch):
