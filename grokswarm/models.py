@@ -74,6 +74,8 @@ class SwarmState:
     vi_mode: bool = False
     claude_mode: bool = False
     dualhead_mode: bool = False
+    dualhead_max_rounds: int = 5        # normal rounds before escalation
+    dualhead_escalation_rounds: int = 1 # extra rounds with hardcore model
     swarm_mode: bool = False
     agent_mode: int = 0
     deliberation_log: list = field(default_factory=list)  # list[DeliberationRound]

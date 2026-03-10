@@ -822,10 +822,12 @@ class ExternalReviewer:
         parts.append(f"\n## Current Plan to Review\n{plan_text}")
         parts.append(
             "\n## Instructions\n"
-            "Review this plan for: completeness, correctness, parallelism opportunities, "
-            "missing edge cases, and test coverage.\n"
-            "If the plan is good, respond with exactly: APPROVED\n"
-            "Otherwise, provide specific, actionable feedback for improvement."
+            "You and Grok are collaborating to produce the best plan.\n"
+            "Review for: completeness, correctness, parallelism, edge cases, test coverage.\n"
+            "If the plan is good enough to execute successfully, respond with: APPROVED\n"
+            "You may add advisory notes AFTER the APPROVED line — Grok will see them.\n"
+            "Only reject (respond without APPROVED) for issues that would cause the task to FAIL.\n"
+            "Minor style or optimization suggestions should be noted AFTER APPROVED, not used as rejection reasons."
         )
         return "\n".join(parts)
 
@@ -835,7 +837,18 @@ class ExternalReviewer:
         CLI errors auto-approve so agents aren't blocked by tooling failures."""
         if response.startswith("[Claude review error:") or response.startswith("[Claude review timed out]") or response.startswith("[Claude CLI not found"):
             return True
-        return "APPROVED" in response.upper().split("\n")[0]
+        # Check first few non-blank lines for APPROVED (Claude sometimes adds preamble)
+        lines_checked = 0
+        for line in response.split("\n"):
+            stripped = line.strip().upper()
+            if not stripped:
+                continue
+            if "APPROVED" in stripped:
+                return True
+            lines_checked += 1
+            if lines_checked >= 3:
+                break
+        return False
 
     def record_exchange(self, round_num: int, plan: str, feedback: str, approved: bool):
         """Record a deliberation round for context persistence."""
@@ -1455,6 +1468,9 @@ class GuardrailPipeline:
         self._is_simple_task = False
         self._step_notified: set[str] = set()
         self._needs_deliberation = False  # set after plan transition when dualhead is on
+        self._deliberation_round = 0
+        self._deliberation_history = []   # [(plan_text, feedback, approved)]
+        self._deliberation_escalated = False
 
         # Model routing — sub-agents use reasoning for planning (task already
         # well-defined by orchestrator decomposition, no need for expensive hardcore)
@@ -1668,10 +1684,12 @@ class GuardrailPipeline:
         return deviation
 
     async def deliberate_on_agent_plan(self, conversation: list[dict]):
-        """If dualhead flag is set, send the agent's plan to Claude for review.
+        """Multi-round dualhead deliberation with escalation.
 
-        Injects Claude's feedback into the conversation so Grok can revise
-        before executing. Clears the flag after running.
+        Tracks rounds across calls. Flow:
+          Rounds 1..N: Grok plans → Claude reviews (progressively lenient)
+          Round N+1:   Hardcore Grok synthesizes → Claude reviews (lenient)
+          After total max: auto-approve (Grok final say)
         """
         if not self._needs_deliberation:
             return
@@ -1681,59 +1699,302 @@ class GuardrailPipeline:
         if not plan_steps:
             return
 
-        plan_text = "\n".join(f"{i+1}. {s.get('step', s)}" for i, s in enumerate(plan_steps))
-        formatted = (
-            f"## Agent: {self.display_name}\n"
-            f"## Task: {self.task_desc}\n\n"
-            f"**Plan ({len(plan_steps)} steps):**\n{plan_text}"
-        )
+        self._deliberation_round += 1
+        rnd = self._deliberation_round
+        max_normal = shared.state.dualhead_max_rounds
+        max_escalation = shared.state.dualhead_escalation_rounds
+        total_max = max_normal + max_escalation
 
+        formatted = self._format_plan_for_review()
+
+        # Past total max → auto-approve (Grok final say)
+        if rnd > total_max:
+            self._auto_approve_with_history(conversation)
+            return
+
+        # Escalation phase: hardcore Grok synthesizes, then Claude reviews once more
+        if rnd > max_normal and not self._deliberation_escalated:
+            self._deliberation_escalated = True
+            notify(f"Dualhead: escalating {self.display_name} — hardcore Grok synthesizing plan")
+            shared.console.print(
+                f"\n[bold magenta]\\[Escalation][/bold magenta] "
+                f"Round {rnd}/{total_max}: Hardcore Grok synthesizing from {len(self._deliberation_history)} rounds of feedback..."
+            )
+            new_plan_text = await self._escalate_with_hardcore()
+            if new_plan_text:
+                formatted = self._format_plan_for_review()  # re-format after plan update
+
+        # Build round-aware review prompt and send to Claude
         reviewer = ClaudeReviewer()
         deliberator = Deliberator(reviewer)
         project_summary = deliberator._build_project_summary()
 
-        prompt = reviewer.build_review_prompt(
-            formatted, project_summary, Deliberator.CAPABILITIES, []
+        prompt = self._build_collaborative_review_prompt(
+            formatted, project_summary, rnd, max_normal, total_max
         )
 
-        notify(f"Dualhead: sending {self.display_name}'s plan to Claude for review")
-        shared._set_status(f"dualhead deliberating... reviewing {self.display_name}")
+        phase_label = "escalation" if rnd > max_normal else "normal"
+        notify(f"Dualhead: round {rnd}/{total_max} ({phase_label}) — reviewing {self.display_name}")
+        shared._set_status(f"dualhead round {rnd}/{total_max}... reviewing {self.display_name}")
         shared.console.print(
             f"\n[bold green]\\[Grok → Claude][/bold green] "
-            f"Reviewing {self.display_name}'s plan..."
+            f"Round {rnd}/{total_max} ({phase_label}) — reviewing {self.display_name}'s plan..."
         )
 
         feedback = await reviewer.review(prompt)
         approved = ExternalReviewer.parse_approval(feedback)
-        # Persist to global log so /delib can display it
-        rnd = DeliberationRound(round_num=1, grok_plan=formatted,
-                                reviewer_feedback=feedback, approved=approved)
-        shared.state.deliberation_log.append(rnd)
+
+        # Record history
+        self._deliberation_history.append((formatted, feedback, approved))
+        delib_rnd = DeliberationRound(
+            round_num=rnd, grok_plan=formatted,
+            reviewer_feedback=feedback, approved=approved
+        )
+        shared.state.deliberation_log.append(delib_rnd)
         shared._clear_status()
 
         label = "APPROVED" if approved else "FEEDBACK"
         color = "green" if approved else "yellow"
         shared.console.print(
-            f"[bold {color}]\\[Claude → Grok][/bold {color}] {label}"
+            f"[bold {color}]\\[Claude → Grok][/bold {color}] Round {rnd}/{total_max}: {label}"
         )
         display_fb = feedback[:800] + "..." if len(feedback) > 800 else feedback
         shared.console.print(f"[dim]{display_fb}[/dim]")
 
-        if not approved:
+        if approved:
+            # Inject advisory notes (text after APPROVED line) as non-blocking context
+            notes = self._extract_advisory_notes(feedback)
+            if notes:
+                conversation.append({
+                    "role": "user",
+                    "content": (
+                        "[DUALHEAD NOTE] Claude approved your plan with advisory notes:\n\n"
+                        f"{notes}\n\n"
+                        "These are suggestions, not blockers. Proceed with execution."
+                    ),
+                })
+            notify(f"Dualhead: {self.display_name}'s plan approved by Claude (round {rnd})")
+        elif rnd >= total_max:
+            # Escalation round feedback → Grok final say, auto-approve
+            self._auto_approve_with_history(conversation)
+        else:
+            # Normal feedback → inject and revert to planning
+            remaining = total_max - rnd
             conversation.append({
                 "role": "user",
                 "content": (
-                    "[DUALHEAD REVIEW] An external reviewer (Claude) has feedback on your plan:\n\n"
+                    f"[DUALHEAD REVIEW — Round {rnd}/{total_max}] "
+                    f"Claude has feedback on your plan ({remaining} round(s) remaining before auto-approve):\n\n"
                     f"{feedback}\n\n"
                     "Revise your plan with update_plan to address this feedback, then proceed."
                 ),
             })
-            # Revert to planning so agent must update_plan again
             self.agent.phase = "planning"
             self.agent.approved_plan = None
-            shared._log(f"agent {self.display_name}: dualhead review — sent back to planning")
+            shared._log(f"agent {self.display_name}: dualhead round {rnd} — sent back to planning")
+
+    def _format_plan_for_review(self) -> str:
+        """Format the agent's current plan as markdown for review."""
+        plan_steps = self.agent.plan or []
+        plan_text = "\n".join(
+            f"{i+1}. {s.get('step', s)}" for i, s in enumerate(plan_steps)
+        )
+        return (
+            f"## Agent: {self.display_name}\n"
+            f"## Task: {self.task_desc}\n\n"
+            f"**Plan ({len(plan_steps)} steps):**\n{plan_text}"
+        )
+
+    def _build_collaborative_review_prompt(
+        self, plan_text: str, project_summary: str,
+        current_round: int, max_normal: int, total_max: int
+    ) -> str:
+        """Build a round-aware review prompt with history and escalation context."""
+        parts = [
+            "You are reviewing a plan generated by GrokSwarm (an AI coding agent).",
+            f"\n## Project Context\n{project_summary}",
+            f"\n## GrokSwarm Capabilities\n{Deliberator.CAPABILITIES}",
+        ]
+
+        # Include deliberation history
+        if self._deliberation_history:
+            parts.append("\n## Prior Deliberation Rounds")
+            for i, (prev_plan, prev_feedback, prev_approved) in enumerate(self._deliberation_history, 1):
+                status = "APPROVED" if prev_approved else "FEEDBACK"
+                parts.append(f"\n### Round {i} ({status})")
+                parts.append(f"**Plan:**\n{prev_plan}")
+                parts.append(f"**Your feedback:**\n{prev_feedback}")
+
+        parts.append(f"\n## Current Plan to Review (Round {current_round}/{total_max})\n{plan_text}")
+
+        # Progressive leniency based on round
+        if self._deliberation_escalated:
+            parts.append(
+                "\n## Instructions\n"
+                "This plan was synthesized by a senior Grok model from all prior feedback.\n"
+                "APPROVE unless the plan is fundamentally broken and would certainly fail.\n"
+                "You may add advisory notes AFTER the APPROVED line.\n"
+                "Respond with APPROVED unless there are critical showstopper issues."
+            )
+        elif current_round >= max_normal:
+            parts.append(
+                "\n## Instructions\n"
+                f"This is the FINAL normal round ({current_round}/{max_normal}). "
+                "Next round triggers hardcore escalation.\n"
+                "You and Grok are collaborating to produce the best plan.\n"
+                "Only reject for CRITICAL issues that would cause the task to FAIL.\n"
+                "If the plan is workable, respond with: APPROVED\n"
+                "Add advisory notes AFTER the APPROVED line if needed."
+            )
+        elif current_round > max_normal // 2:
+            parts.append(
+                "\n## Instructions\n"
+                f"Round {current_round}/{max_normal} — approaching escalation threshold.\n"
+                "You and Grok are collaborating to produce the best plan.\n"
+                "Review for: completeness, correctness, parallelism, edge cases, test coverage.\n"
+                "If the plan is good enough to execute successfully, respond with: APPROVED\n"
+                "You may add advisory notes AFTER the APPROVED line.\n"
+                "Only reject for issues that would cause the task to FAIL.\n"
+                "Minor style or optimization suggestions should be noted AFTER APPROVED."
+            )
         else:
-            notify(f"Dualhead: {self.display_name}'s plan approved by Claude")
+            parts.append(
+                "\n## Instructions\n"
+                f"Round {current_round}/{max_normal}.\n"
+                "You and Grok are collaborating to produce the best plan.\n"
+                "Review for: completeness, correctness, parallelism, edge cases, test coverage.\n"
+                "If the plan is good enough to execute successfully, respond with: APPROVED\n"
+                "You may add advisory notes AFTER the APPROVED line — Grok will see them.\n"
+                "Only reject (respond without APPROVED) for issues that would cause the task to FAIL.\n"
+                "Minor style or optimization suggestions should be noted AFTER APPROVED, not used as rejection reasons."
+            )
+
+        return "\n".join(parts)
+
+    async def _escalate_with_hardcore(self) -> str | None:
+        """Call hardcore Grok to synthesize a final plan from all deliberation history.
+
+        Updates self.agent.plan with the synthesized plan and returns the raw text.
+        """
+        from grokswarm import llm
+
+        history_text = ""
+        for i, (plan, feedback, approved) in enumerate(self._deliberation_history, 1):
+            status = "APPROVED" if approved else "REJECTED"
+            history_text += f"\n### Round {i} ({status})\n**Plan:**\n{plan}\n**Feedback:**\n{feedback}\n"
+
+        prompt = (
+            f"You are a senior AI planning expert. An agent working on the task below has gone through "
+            f"{len(self._deliberation_history)} rounds of plan review with feedback from an external reviewer.\n\n"
+            f"## Task\n{self.task_desc}\n\n"
+            f"## Deliberation History\n{history_text}\n\n"
+            f"## Your Job\n"
+            f"Synthesize the best possible plan incorporating all valid feedback. "
+            f"Output ONLY a numbered list of plan steps (1. ... 2. ... etc). "
+            f"Be concrete, actionable, and thorough. Address the reviewer's concerns where valid, "
+            f"but use your judgment — not all feedback needs to be followed."
+        )
+
+        messages = [
+            {"role": "system", "content": "You are a senior AI planning expert. Output a clear, actionable plan."},
+            {"role": "user", "content": prompt},
+        ]
+
+        try:
+            model = MODEL_ROUTING["hardcore"]
+            chat = llm.create_chat(model)
+            llm.populate_chat(chat, messages)
+            response = await shared._api_call_with_retry(
+                lambda: chat.sample(),
+                label=f"Dualhead:escalate({self.display_name})"
+            )
+            usage = llm.extract_usage(response)
+            if usage["prompt_tokens"] or usage["completion_tokens"]:
+                from grokswarm.agents import _record_usage
+                _record_usage(model, usage["prompt_tokens"], usage["completion_tokens"],
+                              usage["cached_tokens"])
+
+            plan_text = (response.content or "").strip()
+            if not plan_text:
+                return None
+
+            # Parse numbered steps and update agent plan
+            new_steps = []
+            for line in plan_text.split("\n"):
+                line = line.strip()
+                if re.match(r"^\d+\.\s", line):
+                    step_text = re.sub(r"^\d+\.\s*", "", line)
+                    new_steps.append({"step": step_text})
+            if new_steps:
+                self.agent.plan = new_steps
+                shared.console.print(
+                    f"[bold magenta]\\[Escalation][/bold magenta] "
+                    f"Hardcore Grok produced {len(new_steps)}-step plan for {self.display_name}"
+                )
+            return plan_text
+        except Exception as e:
+            shared.console.print(
+                f"[swarm.warning]Dualhead escalation failed: {type(e).__name__}: {str(e)[:100]}[/swarm.warning]"
+            )
+            shared._log(f"dualhead escalation error for {self.display_name}: {e}")
+            return None
+
+    def _auto_approve_with_history(self, conversation: list[dict]):
+        """Auto-approve the plan (Grok final say) and inject all prior feedback as advisory."""
+        all_feedback = []
+        for i, (_, feedback, approved) in enumerate(self._deliberation_history, 1):
+            if not approved:
+                all_feedback.append(f"Round {i}: {feedback}")
+
+        notes = "\n\n".join(all_feedback) if all_feedback else "No prior feedback."
+
+        conversation.append({
+            "role": "user",
+            "content": (
+                "[DUALHEAD FINAL — Grok Edit Master Head] "
+                "Your plan has been auto-approved after maximum deliberation rounds.\n\n"
+                "Prior reviewer feedback (advisory only, not blocking):\n\n"
+                f"{notes}\n\n"
+                "Proceed with execution. Consider the feedback where practical."
+            ),
+        })
+
+        # Log approval
+        rnd = DeliberationRound(
+            round_num=self._deliberation_round,
+            grok_plan=self._format_plan_for_review(),
+            reviewer_feedback="[AUTO-APPROVED — Grok Edit Master Head]",
+            approved=True
+        )
+        shared.state.deliberation_log.append(rnd)
+
+        shared.console.print(
+            f"[bold magenta]\\[Grok Edit Master Head][/bold magenta] "
+            f"{self.display_name}'s plan auto-approved after {self._deliberation_round} rounds"
+        )
+        notify(f"Dualhead: {self.display_name} auto-approved (Grok final say)")
+        shared._log(f"agent {self.display_name}: dualhead auto-approved after {self._deliberation_round} rounds")
+
+    @staticmethod
+    def _extract_advisory_notes(feedback: str) -> str:
+        """Extract text after the APPROVED line as advisory notes."""
+        lines = feedback.split("\n")
+        found_approved = False
+        note_lines = []
+        for line in lines:
+            if found_approved:
+                note_lines.append(line)
+            elif "APPROVED" in line.strip().upper():
+                # Include any text on the same line after APPROVED
+                after = line.strip().upper().split("APPROVED", 1)[-1].strip()
+                if after and after not in (".", "!"):
+                    # Get original case text after APPROVED
+                    orig_after = line.strip().split("APPROVED", 1)[-1].strip() if "APPROVED" in line else ""
+                    if orig_after:
+                        note_lines.append(orig_after)
+                found_approved = True
+        result = "\n".join(note_lines).strip()
+        return result
 
     def check_verification_gate(self, round_num: int, max_rounds: int, conversation: list[dict]) -> bool:
         """Check if agent should be forced to run tests. Returns True to continue loop."""
