@@ -1472,6 +1472,7 @@ class GuardrailPipeline:
         self._deliberation_history = []   # [(plan_text, feedback, approved)]
         self._deliberation_escalated = False
         self.deliberation_bonus_rounds = 0  # legacy — kept for test compat
+        self._deliberation_time_total = 0.0  # cumulative seconds spent in deliberation
 
         # Model routing — sub-agents use reasoning for planning (task already
         # well-defined by orchestrator decomposition, no need for expensive hardcore)
@@ -1695,104 +1696,109 @@ class GuardrailPipeline:
         if not self._needs_deliberation:
             return
         self._needs_deliberation = False
+        _delib_t0 = time.monotonic()
+        try:
+            plan_steps = self.agent.plan
+            if not plan_steps:
+                return
 
-        plan_steps = self.agent.plan
-        if not plan_steps:
-            return
+            self._deliberation_round += 1
+            rnd = self._deliberation_round
+            max_normal = shared.state.dualhead_max_rounds
+            max_escalation = shared.state.dualhead_escalation_rounds
+            total_max = max_normal + max_escalation
 
-        self._deliberation_round += 1
-        rnd = self._deliberation_round
-        max_normal = shared.state.dualhead_max_rounds
-        max_escalation = shared.state.dualhead_escalation_rounds
-        total_max = max_normal + max_escalation
+            formatted = self._format_plan_for_review()
 
-        formatted = self._format_plan_for_review()
+            # Past total max → auto-approve (Grok final say)
+            if rnd > total_max:
+                self._auto_approve_with_history(conversation)
+                return
 
-        # Past total max → auto-approve (Grok final say)
-        if rnd > total_max:
-            self._auto_approve_with_history(conversation)
-            return
+            # Escalation phase: hardcore Grok synthesizes, then Claude reviews once more
+            if rnd > max_normal and not self._deliberation_escalated:
+                self._deliberation_escalated = True
+                notify(f"Dualhead: escalating {self.display_name} — hardcore Grok synthesizing plan")
+                shared.console.print(
+                    f"\n[bold magenta]\\[Escalation][/bold magenta] "
+                    f"Round {rnd}/{total_max}: Hardcore Grok synthesizing from {len(self._deliberation_history)} rounds of feedback..."
+                )
+                new_plan_text = await self._escalate_with_hardcore()
+                if new_plan_text:
+                    formatted = self._format_plan_for_review()  # re-format after plan update
 
-        # Escalation phase: hardcore Grok synthesizes, then Claude reviews once more
-        if rnd > max_normal and not self._deliberation_escalated:
-            self._deliberation_escalated = True
-            notify(f"Dualhead: escalating {self.display_name} — hardcore Grok synthesizing plan")
-            shared.console.print(
-                f"\n[bold magenta]\\[Escalation][/bold magenta] "
-                f"Round {rnd}/{total_max}: Hardcore Grok synthesizing from {len(self._deliberation_history)} rounds of feedback..."
+            # Build round-aware review prompt and send to Claude
+            reviewer = ClaudeReviewer()
+            deliberator = Deliberator(reviewer)
+            project_summary = deliberator._build_project_summary()
+
+            prompt = self._build_collaborative_review_prompt(
+                formatted, project_summary, rnd, max_normal, total_max
             )
-            new_plan_text = await self._escalate_with_hardcore()
-            if new_plan_text:
-                formatted = self._format_plan_for_review()  # re-format after plan update
 
-        # Build round-aware review prompt and send to Claude
-        reviewer = ClaudeReviewer()
-        deliberator = Deliberator(reviewer)
-        project_summary = deliberator._build_project_summary()
+            phase_label = "escalation" if rnd > max_normal else "normal"
+            notify(f"Dualhead: round {rnd}/{total_max} ({phase_label}) — reviewing {self.display_name}")
+            shared._set_status(f"dualhead round {rnd}/{total_max}... reviewing {self.display_name}")
+            shared.console.print(
+                f"\n[bold green]\\[Grok → Claude][/bold green] "
+                f"Round {rnd}/{total_max} ({phase_label}) — reviewing {self.display_name}'s plan..."
+            )
 
-        prompt = self._build_collaborative_review_prompt(
-            formatted, project_summary, rnd, max_normal, total_max
-        )
+            feedback = await reviewer.review(prompt)
+            approved = ExternalReviewer.parse_approval(feedback)
 
-        phase_label = "escalation" if rnd > max_normal else "normal"
-        notify(f"Dualhead: round {rnd}/{total_max} ({phase_label}) — reviewing {self.display_name}")
-        shared._set_status(f"dualhead round {rnd}/{total_max}... reviewing {self.display_name}")
-        shared.console.print(
-            f"\n[bold green]\\[Grok → Claude][/bold green] "
-            f"Round {rnd}/{total_max} ({phase_label}) — reviewing {self.display_name}'s plan..."
-        )
+            # Record history
+            self._deliberation_history.append((formatted, feedback, approved))
+            delib_rnd = DeliberationRound(
+                round_num=rnd, grok_plan=formatted,
+                reviewer_feedback=feedback, approved=approved
+            )
+            shared.state.deliberation_log.append(delib_rnd)
+            shared._clear_status()
 
-        feedback = await reviewer.review(prompt)
-        approved = ExternalReviewer.parse_approval(feedback)
+            label = "APPROVED" if approved else "FEEDBACK"
+            color = "green" if approved else "yellow"
+            shared.console.print(
+                f"[bold {color}]\\[Claude → Grok][/bold {color}] Round {rnd}/{total_max}: {label}"
+            )
+            display_fb = feedback[:800] + "..." if len(feedback) > 800 else feedback
+            shared.console.print(f"[dim]{display_fb}[/dim]")
 
-        # Record history
-        self._deliberation_history.append((formatted, feedback, approved))
-        delib_rnd = DeliberationRound(
-            round_num=rnd, grok_plan=formatted,
-            reviewer_feedback=feedback, approved=approved
-        )
-        shared.state.deliberation_log.append(delib_rnd)
-        shared._clear_status()
-
-        label = "APPROVED" if approved else "FEEDBACK"
-        color = "green" if approved else "yellow"
-        shared.console.print(
-            f"[bold {color}]\\[Claude → Grok][/bold {color}] Round {rnd}/{total_max}: {label}"
-        )
-        display_fb = feedback[:800] + "..." if len(feedback) > 800 else feedback
-        shared.console.print(f"[dim]{display_fb}[/dim]")
-
-        if approved:
-            # Inject advisory notes (text after APPROVED line) as non-blocking context
-            notes = self._extract_advisory_notes(feedback)
-            if notes:
+            if approved:
+                # Inject advisory notes (text after APPROVED line) as non-blocking context
+                notes = self._extract_advisory_notes(feedback)
+                if notes:
+                    conversation.append({
+                        "role": "user",
+                        "content": (
+                            "[DUALHEAD NOTE] Claude approved your plan with advisory notes:\n\n"
+                            f"{notes}\n\n"
+                            "These are suggestions, not blockers. Proceed with execution."
+                        ),
+                    })
+                notify(f"Dualhead: {self.display_name}'s plan approved by Claude (round {rnd})")
+            elif rnd >= total_max:
+                # Escalation round feedback → Grok final say, auto-approve
+                self._auto_approve_with_history(conversation)
+            else:
+                # Normal feedback → inject and revert to planning
+                remaining = total_max - rnd
                 conversation.append({
                     "role": "user",
                     "content": (
-                        "[DUALHEAD NOTE] Claude approved your plan with advisory notes:\n\n"
-                        f"{notes}\n\n"
-                        "These are suggestions, not blockers. Proceed with execution."
+                        f"[DUALHEAD REVIEW — Round {rnd}/{total_max}] "
+                        f"Claude has feedback on your plan ({remaining} round(s) remaining before auto-approve):\n\n"
+                        f"{feedback}\n\n"
+                        "Revise your plan with update_plan to address this feedback, then proceed."
                     ),
                 })
-            notify(f"Dualhead: {self.display_name}'s plan approved by Claude (round {rnd})")
-        elif rnd >= total_max:
-            # Escalation round feedback → Grok final say, auto-approve
-            self._auto_approve_with_history(conversation)
-        else:
-            # Normal feedback → inject and revert to planning
-            remaining = total_max - rnd
-            conversation.append({
-                "role": "user",
-                "content": (
-                    f"[DUALHEAD REVIEW — Round {rnd}/{total_max}] "
-                    f"Claude has feedback on your plan ({remaining} round(s) remaining before auto-approve):\n\n"
-                    f"{feedback}\n\n"
-                    "Revise your plan with update_plan to address this feedback, then proceed."
-                ),
-            })
-            self.agent.phase = "planning"
-            self.agent.approved_plan = None
-            shared._log(f"agent {self.display_name}: dualhead round {rnd} — sent back to planning")
+                self.agent.phase = "planning"
+                self.agent.approved_plan = None
+                shared._log(f"agent {self.display_name}: dualhead round {rnd} — sent back to planning")
+        finally:
+            _delib_elapsed = time.monotonic() - _delib_t0
+            self._deliberation_time_total += _delib_elapsed
+            shared._last_deliberation_time += _delib_elapsed
 
     def _format_plan_for_review(self) -> str:
         """Format the agent's current plan as markdown for review."""

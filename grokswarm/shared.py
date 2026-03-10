@@ -260,6 +260,7 @@ _bus_instance = None
 # -- Orchestrator DAG (for /tasks display) --
 _current_dag = None
 _last_planning_time: float = 0.0  # seconds spent in Orchestrator decomposition
+_last_deliberation_time: float = 0.0  # seconds spent in dualhead deliberation
 
 
 # -- Secret patterns --

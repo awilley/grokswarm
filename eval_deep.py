@@ -113,6 +113,7 @@ class RunMetrics:
     checks_total: int = 0
     check_details: list[dict] = field(default_factory=list)
     planning_time: float = 0.0   # Orchestrator decomposition time (swarm only)
+    deliberation_time: float = 0.0  # Dualhead deliberation time (excluded from exec time)
     error: str = ""
 
 
@@ -177,8 +178,11 @@ def _compute_verdict_v2(single: RunMetrics, swarm: RunMetrics) -> tuple[str, flo
     """Cost-adjusted verdict. Same as _compute_verdict but with efficiency awareness."""
     quality_delta = swarm.quality_score - single.quality_score
 
-    if single.time_seconds > 0 and swarm.time_seconds > 0:
-        speedup = single.time_seconds / swarm.time_seconds
+    # Use exec time (excluding deliberation) for speedup
+    s_exec = single.time_seconds - single.deliberation_time
+    w_exec = swarm.time_seconds - swarm.deliberation_time
+    if s_exec > 0 and w_exec > 0:
+        speedup = s_exec / w_exec
     else:
         speedup = 1.0
 
@@ -250,8 +254,11 @@ def _compute_verdict(single: RunMetrics, swarm: RunMetrics) -> tuple[str, float,
     """Compute verdict, quality_delta, speedup, cost_ratio."""
     quality_delta = swarm.quality_score - single.quality_score
 
-    if single.time_seconds > 0 and swarm.time_seconds > 0:
-        speedup = single.time_seconds / swarm.time_seconds
+    # Use exec time (excluding deliberation) for speedup
+    s_exec = single.time_seconds - single.deliberation_time
+    w_exec = swarm.time_seconds - swarm.deliberation_time
+    if s_exec > 0 and w_exec > 0:
+        speedup = s_exec / w_exec
     else:
         speedup = 1.0
 
@@ -290,11 +297,13 @@ def _compute_efficiency_scores(r: ComparativeResult) -> None:
             r.single_cost_score = round(sq, 4)
             r.swarm_cost_score = round(wq, 4)
 
-        # Time scores: quality * (min_time / this_time)
-        min_time = min(r.single.time_seconds, r.swarm.time_seconds) if r.single.time_seconds > 0 and r.swarm.time_seconds > 0 else 0
+        # Time scores: quality * (min_exec_time / this_exec_time) — excludes deliberation
+        s_exec = r.single.time_seconds - r.single.deliberation_time
+        w_exec = r.swarm.time_seconds - r.swarm.deliberation_time
+        min_time = min(s_exec, w_exec) if s_exec > 0 and w_exec > 0 else 0
         if min_time > 0:
-            r.single_time_score = round(sq * (min_time / r.single.time_seconds), 4)
-            r.swarm_time_score = round(wq * (min_time / r.swarm.time_seconds), 4)
+            r.single_time_score = round(sq * (min_time / s_exec), 4)
+            r.swarm_time_score = round(wq * (min_time / w_exec), 4)
         else:
             r.single_time_score = round(sq, 4)
             r.swarm_time_score = round(wq, 4)
@@ -433,12 +442,16 @@ def _save_eval_scores(results: list[ComparativeResult]) -> Path:
             "single_quality": r.single.quality_score,
             "single_cost_usd": r.single.cost_usd,
             "single_time_s": r.single.time_seconds,
+            "single_exec_time_s": r.single.time_seconds - r.single.deliberation_time,
+            "single_deliberation_time_s": r.single.deliberation_time,
             "single_cost_score": r.single_cost_score,
             "single_time_score": r.single_time_score,
             "single_overall": r.single_overall,
             "swarm_quality": r.swarm.quality_score,
             "swarm_cost_usd": r.swarm.cost_usd,
             "swarm_time_s": r.swarm.time_seconds,
+            "swarm_exec_time_s": r.swarm.time_seconds - r.swarm.deliberation_time,
+            "swarm_deliberation_time_s": r.swarm.deliberation_time,
             "swarm_cost_score": r.swarm_cost_score,
             "swarm_time_score": r.swarm_time_score,
             "swarm_overall": r.swarm_overall,
@@ -1366,6 +1379,7 @@ async def _run_single_agent(task: DeepEvalTask, workspace: Path) -> RunMetrics:
     t0 = time.monotonic()
     tokens_before = shared.state.global_tokens_used
     cost_before = shared.state.global_cost_usd
+    shared._last_deliberation_time = 0.0
     agent_name = f"deep_single_{task.id}"
     error = ""
 
@@ -1415,6 +1429,7 @@ async def _run_single_agent(task: DeepEvalTask, workspace: Path) -> RunMetrics:
     # Run weighted checks
     metrics = _run_weighted_checks(task.checks, workspace)
     metrics.time_seconds = elapsed
+    metrics.deliberation_time = shared._last_deliberation_time
     metrics.cost_usd = cost
     metrics.tokens_used = tokens
     metrics.rounds_used = rounds
@@ -1434,6 +1449,7 @@ async def _run_swarm(task: DeepEvalTask, workspace: Path) -> RunMetrics:
     tokens_before = shared.state.global_tokens_used
     cost_before = shared.state.global_cost_usd
     shared._last_planning_time = 0.0
+    shared._last_deliberation_time = 0.0
     error = ""
 
     try:
@@ -1473,6 +1489,7 @@ async def _run_swarm(task: DeepEvalTask, workspace: Path) -> RunMetrics:
     metrics = _run_weighted_checks(task.checks, workspace)
     metrics.time_seconds = elapsed
     metrics.planning_time = planning_time
+    metrics.deliberation_time = shared._last_deliberation_time
     metrics.cost_usd = cost
     metrics.tokens_used = tokens
     metrics.error = error
@@ -1500,15 +1517,19 @@ async def run_comparative(task: DeepEvalTask) -> ComparativeResult:
         # Run single-agent path
         print(f"  [Single Agent] Running {task.id}...")
         result.single = await _run_single_agent(task, ws_single)
+        s_exec = result.single.time_seconds - result.single.deliberation_time
         print(f"  [Single Agent] Score: {result.single.quality_score:.2%} | "
-              f"Time: {result.single.time_seconds:.1f}s | Cost: ${result.single.cost_usd:.4f}")
+              f"Exec: {s_exec:.1f}s | Delib: {result.single.deliberation_time:.1f}s | "
+              f"Cost: ${result.single.cost_usd:.4f}")
 
         if task.use_swarm:
             # Run swarm path
             print(f"  [Swarm]        Running {task.id}...")
             result.swarm = await _run_swarm(task, ws_swarm)
+            w_exec = result.swarm.time_seconds - result.swarm.deliberation_time
             print(f"  [Swarm]        Score: {result.swarm.quality_score:.2%} | "
-                  f"Time: {result.swarm.time_seconds:.1f}s | Cost: ${result.swarm.cost_usd:.4f}")
+                  f"Exec: {w_exec:.1f}s | Delib: {result.swarm.deliberation_time:.1f}s | "
+                  f"Cost: ${result.swarm.cost_usd:.4f}")
         else:
             # No swarm comparison (e.g., learning eval)
             result.swarm = RunMetrics()
@@ -1540,8 +1561,10 @@ async def run_learning_eval(task: DeepEvalTask) -> ComparativeResult:
         # Run 1: Fresh (no lessons)
         print(f"  [Run 1: Fresh] Running {task.id}...")
         result.single = await _run_single_agent(task, ws1)
+        r1_exec = result.single.time_seconds - result.single.deliberation_time
         print(f"  [Run 1: Fresh] Score: {result.single.quality_score:.2%} | "
-              f"Time: {result.single.time_seconds:.1f}s")
+              f"Exec: {r1_exec:.1f}s | Delib: {result.single.deliberation_time:.1f}s | "
+              f"Cost: ${result.single.cost_usd:.4f}")
 
         # Seed LessonsDB for Run 2
         if task.learning_seed:
@@ -1578,8 +1601,10 @@ async def run_learning_eval(task: DeepEvalTask) -> ComparativeResult:
 
         print(f"  [Run 2: With Lessons] Running {task.id}...")
         result.swarm = await _run_single_agent(run2_task, ws2)
+        r2_exec = result.swarm.time_seconds - result.swarm.deliberation_time
         print(f"  [Run 2: With Lessons] Score: {result.swarm.quality_score:.2%} | "
-              f"Time: {result.swarm.time_seconds:.1f}s")
+              f"Exec: {r2_exec:.1f}s | Delib: {result.swarm.deliberation_time:.1f}s | "
+              f"Cost: ${result.swarm.cost_usd:.4f}")
 
     result.verdict, result.quality_delta, result.speedup, result.cost_ratio = \
         _compute_verdict(result.single, result.swarm)
@@ -1830,7 +1855,10 @@ def format_deep_report(results: list[ComparativeResult]) -> str:
     for r in results:
         lines.append(f"\n  {r.task_id} — {r.description}")
         if r.single.check_details:
-            lines.append(f"    [Single Agent]")
+            s_exec = r.single.time_seconds - r.single.deliberation_time
+            lines.append(f"    [Single Agent] Score: {r.single.quality_score:.0%} | "
+                        f"Exec: {s_exec:.1f}s | Delib: {r.single.deliberation_time:.1f}s | "
+                        f"Cost: ${r.single.cost_usd:.4f}")
             for d in r.single.check_details:
                 status = "PASS" if d["passed"] else "FAIL"
                 lines.append(f"      [{status}] {d['check']} ({d['category']} w={d['weight']:.1f}): "
@@ -1838,7 +1866,10 @@ def format_deep_report(results: list[ComparativeResult]) -> str:
             if r.single.error:
                 lines.append(f"      ERROR: {r.single.error[:80]}")
         if r.swarm.check_details:
-            lines.append(f"    [Swarm]")
+            w_exec = r.swarm.time_seconds - r.swarm.deliberation_time
+            lines.append(f"    [Swarm] Score: {r.swarm.quality_score:.0%} | "
+                        f"Exec: {w_exec:.1f}s | Delib: {r.swarm.deliberation_time:.1f}s | "
+                        f"Cost: ${r.swarm.cost_usd:.4f}")
             for d in r.swarm.check_details:
                 status = "PASS" if d["passed"] else "FAIL"
                 lines.append(f"      [{status}] {d['check']} ({d['category']} w={d['weight']:.1f}): "
