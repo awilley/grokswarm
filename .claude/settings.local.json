@@ -24,7 +24,8 @@
       "Bash(rm:*)",
       "Bash(python3:*)",
       "Bash(claude:*)",
-      "Bash(env:*)"
+      "Bash(env:*)",
+      "Bash(tasklist:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

@@ -736,7 +736,10 @@ Rules:
         return full_output
     except Exception as e:
         agent.transition(AgentState.ERROR)
+        import traceback
+        tb = traceback.format_exc()
         shared.console.print(f"[swarm.error]Expert {data['name']} ({display_name}) API error: {e}[/swarm.error]")
+        shared._log(f"Expert {display_name} traceback:\n{tb}")
         try:
             from grokswarm.bugs import log_exception
             log_exception(e, context_label=f"Expert:{data['name']}({display_name})")

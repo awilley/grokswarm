@@ -1928,7 +1928,7 @@ class GuardrailPipeline:
                 line = line.strip()
                 if re.match(r"^\d+\.\s", line):
                     step_text = re.sub(r"^\d+\.\s*", "", line)
-                    new_steps.append({"step": step_text})
+                    new_steps.append({"step": step_text, "status": "pending"})
             if new_steps:
                 self.agent.plan = new_steps
                 shared.console.print(
@@ -2060,10 +2060,10 @@ class GuardrailPipeline:
 
         # Milestone notifications for plan steps
         if self.agent.plan:
-            done_count = sum(1 for s in self.agent.plan if s["status"] == "done")
+            done_count = sum(1 for s in self.agent.plan if s.get("status") == "done")
             total_count = len(self.agent.plan)
             for step in self.agent.plan:
-                if step["status"] == "done":
+                if step.get("status") == "done":
                     step_key = step['step'][:30]
                     if step_key not in self._step_notified:
                         self._step_notified.add(step_key)
