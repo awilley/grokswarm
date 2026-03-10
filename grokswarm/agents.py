@@ -508,7 +508,10 @@ Rules:
     shared.state.agent_mode += 1
     try:
         rounds_used = 0
-        for _round in range(max_rounds):
+        _round = -1
+        effective_max = max_rounds
+        while (_round := _round + 1) < effective_max:
+            effective_max = max_rounds + gp.deliberation_bonus_rounds
             rounds_used = _round + 1
 
             conversation = await _trim_conversation(conversation)
@@ -561,7 +564,7 @@ Rules:
                 content = response.content or ""
                 full_output += content
                 conversation.append({"role": "assistant", "content": content})
-                if gp.check_verification_gate(_round, max_rounds, conversation):
+                if gp.check_verification_gate(_round, effective_max, conversation):
                     continue
                 break
 
@@ -575,7 +578,7 @@ Rules:
             if response.content:
                 full_output += response.content + "\n"
 
-            shared._log(f"agent {display_name}: round {_round + 1}/{max_rounds} - {len(tool_calls)} tools")
+            shared._log(f"agent {display_name}: round {_round + 1}/{effective_max} - {len(tool_calls)} tools")
 
             # Parse tool calls
             parsed_tools: list[tuple] = []
@@ -646,15 +649,16 @@ Rules:
                 break
 
         # -- Post-completion: verification + evidence + report --
-        ev_summary, verification_issues = gp.on_completion(tool_actions, full_output, rounds_used, max_rounds)
+        effective_max = max_rounds + gp.deliberation_bonus_rounds
+        ev_summary, verification_issues = gp.on_completion(tool_actions, full_output, rounds_used, effective_max)
 
-        if verification_issues and rounds_used < max_rounds:
+        if verification_issues and rounds_used < effective_max:
             issue_text = "; ".join(verification_issues)
             conversation.append({"role": "user", "content": f"[SYSTEM] Completion verification found issues: {issue_text}. Address these now."})
             shared._log(f"agent {display_name}: verification issues, giving extra rounds: {issue_text}")
             execution_model = gp.execution_model
             _v_xai_tools = llm.convert_tools(agent_tools)
-            for _extra in range(min(2, max_rounds - rounds_used)):
+            for _extra in range(min(2, effective_max - rounds_used)):
                 rounds_used += 1
                 _v_chat = llm.create_chat(execution_model, tools=_v_xai_tools, max_tokens=shared.MAX_TOKENS)
                 llm.populate_chat(_v_chat, conversation)
@@ -697,11 +701,12 @@ Rules:
                         break
                 else:
                     break
-            ev_summary, verification_issues = gp.on_completion(tool_actions, full_output, rounds_used, max_rounds)
+            ev_summary, verification_issues = gp.on_completion(tool_actions, full_output, rounds_used, effective_max)
 
         # Build and post completion report
+        effective_max = max_rounds + gp.deliberation_bonus_rounds
         report = _build_completion_report(
-            display_name, tool_actions, rounds_used, max_rounds, full_output,
+            display_name, tool_actions, rounds_used, effective_max, full_output,
             evidence_summary=ev_summary, verification_issues=verification_issues if verification_issues else None)
         save_memory(f"expert_{display_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}", report)
         if bus:
