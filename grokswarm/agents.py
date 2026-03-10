@@ -234,7 +234,7 @@ Respond ONLY with valid JSON: {{"experts": ["assistant", "researcher"], "team_na
         return {"experts": ["assistant"], "team_name": None, "reason": f"API error fallback: {e}"}
 
 
-EXPERT_DEFAULT_MAX_ROUNDS = 25
+EXPERT_DEFAULT_MAX_ROUNDS = 40
 
 
 def _auto_checkpoint_before_agent(display_name: str):
@@ -507,12 +507,16 @@ Rules:
 
     shared.state.agent_mode += 1
     try:
-        rounds_used = 0
-        _round = -1
-        effective_max = max_rounds
-        while (_round := _round + 1) < effective_max:
-            effective_max = max_rounds + gp.deliberation_bonus_rounds
-            rounds_used = _round + 1
+        rounds_used = 0      # execution-phase rounds (counted toward budget)
+        _total_rounds = 0    # all rounds including planning (safety cap)
+        _HARD_CAP = max_rounds * 3  # absolute cap to prevent runaway loops
+        while rounds_used < max_rounds and _total_rounds < _HARD_CAP:
+            _total_rounds += 1
+
+            # Planning-phase rounds are free — only execution rounds count
+            in_planning = agent.phase == "planning"
+            if not in_planning:
+                rounds_used += 1
 
             conversation = await _trim_conversation(conversation)
 
@@ -525,10 +529,10 @@ Rules:
             agent.transition(AgentState.THINKING)
 
             # Guardrail: inject round-appropriate system messages
-            gp.on_round_start(_round, max_rounds, conversation)
+            gp.on_round_start(rounds_used, max_rounds, conversation)
 
             # Select model (handles phase routing + escalation)
-            round_model = gp.select_model(_round)
+            round_model = gp.select_model(rounds_used)
 
             # -- API call --
             from grokswarm import llm
@@ -564,7 +568,7 @@ Rules:
                 content = response.content or ""
                 full_output += content
                 conversation.append({"role": "assistant", "content": content})
-                if gp.check_verification_gate(_round, effective_max, conversation):
+                if gp.check_verification_gate(rounds_used, max_rounds, conversation):
                     continue
                 break
 
@@ -578,7 +582,8 @@ Rules:
             if response.content:
                 full_output += response.content + "\n"
 
-            shared._log(f"agent {display_name}: round {_round + 1}/{effective_max} - {len(tool_calls)} tools")
+            _phase_tag = "plan" if in_planning else "exec"
+            shared._log(f"agent {display_name}: round {rounds_used}/{max_rounds} ({_phase_tag}, total={_total_rounds}) - {len(tool_calls)} tools")
 
             # Parse tool calls
             parsed_tools: list[tuple] = []
@@ -645,20 +650,19 @@ Rules:
             await gp.deliberate_on_agent_plan(conversation)
 
             # Guardrail: loop detection + milestone notifications
-            if gp.on_round_end(_round, conversation):
+            if gp.on_round_end(rounds_used, conversation):
                 break
 
         # -- Post-completion: verification + evidence + report --
-        effective_max = max_rounds + gp.deliberation_bonus_rounds
-        ev_summary, verification_issues = gp.on_completion(tool_actions, full_output, rounds_used, effective_max)
+        ev_summary, verification_issues = gp.on_completion(tool_actions, full_output, rounds_used, max_rounds)
 
-        if verification_issues and rounds_used < effective_max:
+        if verification_issues and rounds_used < max_rounds:
             issue_text = "; ".join(verification_issues)
             conversation.append({"role": "user", "content": f"[SYSTEM] Completion verification found issues: {issue_text}. Address these now."})
             shared._log(f"agent {display_name}: verification issues, giving extra rounds: {issue_text}")
             execution_model = gp.execution_model
             _v_xai_tools = llm.convert_tools(agent_tools)
-            for _extra in range(min(2, effective_max - rounds_used)):
+            for _extra in range(min(2, max_rounds - rounds_used)):
                 rounds_used += 1
                 _v_chat = llm.create_chat(execution_model, tools=_v_xai_tools, max_tokens=shared.MAX_TOKENS)
                 llm.populate_chat(_v_chat, conversation)
@@ -701,12 +705,11 @@ Rules:
                         break
                 else:
                     break
-            ev_summary, verification_issues = gp.on_completion(tool_actions, full_output, rounds_used, effective_max)
+            ev_summary, verification_issues = gp.on_completion(tool_actions, full_output, rounds_used, max_rounds)
 
         # Build and post completion report
-        effective_max = max_rounds + gp.deliberation_bonus_rounds
         report = _build_completion_report(
-            display_name, tool_actions, rounds_used, effective_max, full_output,
+            display_name, tool_actions, rounds_used, max_rounds, full_output,
             evidence_summary=ev_summary, verification_issues=verification_issues if verification_issues else None)
         save_memory(f"expert_{display_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}", report)
         if bus:

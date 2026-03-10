@@ -1471,7 +1471,7 @@ class GuardrailPipeline:
         self._deliberation_round = 0
         self._deliberation_history = []   # [(plan_text, feedback, approved)]
         self._deliberation_escalated = False
-        self.deliberation_bonus_rounds = 0  # extra rounds granted to compensate for deliberation
+        self.deliberation_bonus_rounds = 0  # legacy — kept for test compat
 
         # Model routing — sub-agents use reasoning for planning (task already
         # well-defined by orchestrator decomposition, no need for expensive hardcore)
@@ -1792,10 +1792,7 @@ class GuardrailPipeline:
             })
             self.agent.phase = "planning"
             self.agent.approved_plan = None
-            # Grant 2 bonus rounds per rejection to compensate for deliberation overhead
-            # (1 round for the agent to replan + 1 for the update_plan call)
-            self.deliberation_bonus_rounds += 2
-            shared._log(f"agent {self.display_name}: dualhead round {rnd} — sent back to planning (+2 bonus rounds)")
+            shared._log(f"agent {self.display_name}: dualhead round {rnd} — sent back to planning")
 
     def _format_plan_for_review(self) -> str:
         """Format the agent's current plan as markdown for review."""
