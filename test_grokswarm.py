@@ -2633,3 +2633,333 @@ class TestDeliberation:
         from grokswarm.models import SwarmState
         state = SwarmState()
         assert state.dualhead_mode is False
+
+    def test_dualhead_config_defaults(self):
+        from grokswarm.models import SwarmState
+        state = SwarmState()
+        assert state.dualhead_max_rounds == 5
+        assert state.dualhead_escalation_rounds == 1
+
+
+class TestDualheadDeliberationV2:
+    """Tests for multi-round dualhead deliberation with escalation."""
+
+    def _make_pipeline(self, task="implement feature X with tests and docs"):
+        from grokswarm.guardrails import GuardrailPipeline
+        from grokswarm.models import AgentInfo
+        agent = AgentInfo(name="test-coder", expert="Coder")
+        agent.phase = "executing"
+        agent.plan = [{"step": "Read the codebase"}, {"step": "Write the code"}, {"step": "Run tests"}]
+        expert_data = {"name": "Coder", "mindset": "Clean code", "model_preference": "reasoning"}
+        gp = GuardrailPipeline(agent, "test-coder", task, expert_data, bus=None)
+        gp._needs_deliberation = True
+        return gp, agent
+
+    def test_init_state(self):
+        gp, _ = self._make_pipeline()
+        assert gp._deliberation_round == 0
+        assert gp._deliberation_history == []
+        assert gp._deliberation_escalated is False
+
+    def test_format_plan_for_review(self):
+        gp, _ = self._make_pipeline()
+        formatted = gp._format_plan_for_review()
+        assert "test-coder" in formatted
+        assert "Read the codebase" in formatted
+        assert "3 steps" in formatted
+
+    def test_format_plan_empty(self):
+        gp, agent = self._make_pipeline()
+        agent.plan = []
+        formatted = gp._format_plan_for_review()
+        assert "0 steps" in formatted
+
+    def test_extract_advisory_notes_with_notes(self):
+        from grokswarm.guardrails import GuardrailPipeline
+        feedback = "APPROVED\nConsider adding more error handling.\nAlso check edge cases."
+        notes = GuardrailPipeline._extract_advisory_notes(feedback)
+        assert "error handling" in notes
+        assert "edge cases" in notes
+
+    def test_extract_advisory_notes_approved_only(self):
+        from grokswarm.guardrails import GuardrailPipeline
+        notes = GuardrailPipeline._extract_advisory_notes("APPROVED")
+        assert notes == ""
+
+    def test_extract_advisory_notes_no_approved(self):
+        from grokswarm.guardrails import GuardrailPipeline
+        notes = GuardrailPipeline._extract_advisory_notes("Here is my feedback")
+        assert notes == ""
+
+    def test_extract_advisory_notes_approved_with_preamble(self):
+        from grokswarm.guardrails import GuardrailPipeline
+        feedback = "Looks good!\nAPPROVED\nMinor: consider renaming foo to bar."
+        notes = GuardrailPipeline._extract_advisory_notes(feedback)
+        assert "renaming foo" in notes
+
+    def test_build_collaborative_prompt_early_round(self):
+        gp, _ = self._make_pipeline()
+        prompt = gp._build_collaborative_review_prompt(
+            "plan text", "project summary", 1, 5, 6
+        )
+        assert "Round 1/5" in prompt
+        assert "collaborating" in prompt
+        assert "APPROVED" in prompt
+        assert "FAIL" in prompt
+
+    def test_build_collaborative_prompt_near_max(self):
+        gp, _ = self._make_pipeline()
+        prompt = gp._build_collaborative_review_prompt(
+            "plan text", "project summary", 4, 5, 6
+        )
+        assert "approaching escalation" in prompt
+        assert "FAIL" in prompt
+
+    def test_build_collaborative_prompt_final_normal(self):
+        gp, _ = self._make_pipeline()
+        prompt = gp._build_collaborative_review_prompt(
+            "plan text", "project summary", 5, 5, 6
+        )
+        assert "FINAL normal round" in prompt
+        assert "CRITICAL" in prompt
+
+    def test_build_collaborative_prompt_escalation(self):
+        gp, _ = self._make_pipeline()
+        gp._deliberation_escalated = True
+        prompt = gp._build_collaborative_review_prompt(
+            "plan text", "project summary", 6, 5, 6
+        )
+        assert "senior Grok model" in prompt
+        assert "fundamentally broken" in prompt
+
+    def test_build_collaborative_prompt_includes_history(self):
+        gp, _ = self._make_pipeline()
+        gp._deliberation_history = [
+            ("plan v1", "needs more tests", False),
+            ("plan v2", "APPROVED", True),
+        ]
+        prompt = gp._build_collaborative_review_prompt(
+            "plan v3", "project", 3, 5, 6
+        )
+        assert "Prior Deliberation" in prompt
+        assert "Round 1 (FEEDBACK)" in prompt
+        assert "Round 2 (APPROVED)" in prompt
+        assert "needs more tests" in prompt
+
+    def test_auto_approve_with_history(self):
+        gp, _ = self._make_pipeline()
+        gp._deliberation_round = 6
+        gp._deliberation_history = [
+            ("plan v1", "add error handling", False),
+            ("plan v2", "consider edge cases", False),
+        ]
+        orig_log_len = len(_shared.state.deliberation_log)
+        conversation = []
+        gp._auto_approve_with_history(conversation)
+        assert len(conversation) == 1
+        msg = conversation[0]["content"]
+        assert "DUALHEAD FINAL" in msg
+        assert "Grok Edit Master Head" in msg
+        assert "add error handling" in msg
+        assert "consider edge cases" in msg
+        # Should log approval to deliberation_log
+        assert len(_shared.state.deliberation_log) > orig_log_len
+        last = _shared.state.deliberation_log[-1]
+        assert last.approved is True
+        assert "AUTO-APPROVED" in last.reviewer_feedback
+
+    def test_auto_approve_no_prior_feedback(self):
+        gp, _ = self._make_pipeline()
+        gp._deliberation_round = 6
+        gp._deliberation_history = []
+        conversation = []
+        gp._auto_approve_with_history(conversation)
+        assert "No prior feedback" in conversation[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_deliberate_skips_when_not_needed(self):
+        gp, _ = self._make_pipeline()
+        gp._needs_deliberation = False
+        conversation = []
+        await gp.deliberate_on_agent_plan(conversation)
+        assert gp._deliberation_round == 0
+        assert len(conversation) == 0
+
+    @pytest.mark.asyncio
+    async def test_deliberate_skips_empty_plan(self):
+        gp, agent = self._make_pipeline()
+        agent.plan = []
+        conversation = []
+        await gp.deliberate_on_agent_plan(conversation)
+        # Round incremented but no review since plan is empty
+        assert gp._deliberation_round == 0  # incremented then returns early? Let's check
+        assert len(conversation) == 0
+
+    @pytest.mark.asyncio
+    async def test_deliberate_round1_approved(self, monkeypatch):
+        gp, agent = self._make_pipeline()
+        _shared.state.dualhead_mode = True
+        _shared.state.dualhead_max_rounds = 3
+        _shared.state.dualhead_escalation_rounds = 1
+
+        async def mock_review(self_rev, prompt, timeout=120):
+            return "APPROVED\nLooks great, minor note: consider logging."
+
+        from grokswarm.guardrails import ClaudeReviewer
+        monkeypatch.setattr(ClaudeReviewer, "review", mock_review)
+
+        conversation = []
+        await gp.deliberate_on_agent_plan(conversation)
+
+        assert gp._deliberation_round == 1
+        assert len(gp._deliberation_history) == 1
+        assert gp._deliberation_history[0][2] is True  # approved
+        assert agent.phase == "executing"  # not reverted
+        # Advisory note injected
+        assert any("DUALHEAD NOTE" in m["content"] for m in conversation)
+        assert any("logging" in m["content"] for m in conversation)
+
+    @pytest.mark.asyncio
+    async def test_deliberate_round1_feedback(self, monkeypatch):
+        gp, agent = self._make_pipeline()
+        _shared.state.dualhead_mode = True
+        _shared.state.dualhead_max_rounds = 3
+        _shared.state.dualhead_escalation_rounds = 1
+
+        async def mock_review(self_rev, prompt, timeout=120):
+            return "You need to add error handling for file operations."
+
+        from grokswarm.guardrails import ClaudeReviewer
+        monkeypatch.setattr(ClaudeReviewer, "review", mock_review)
+
+        conversation = []
+        await gp.deliberate_on_agent_plan(conversation)
+
+        assert gp._deliberation_round == 1
+        assert len(gp._deliberation_history) == 1
+        assert gp._deliberation_history[0][2] is False  # not approved
+        assert agent.phase == "planning"  # reverted
+        assert agent.approved_plan is None
+        assert any("DUALHEAD REVIEW" in m["content"] for m in conversation)
+        assert any("Round 1/4" in m["content"] for m in conversation)
+        assert any("3 round(s) remaining" in m["content"] for m in conversation)
+
+    @pytest.mark.asyncio
+    async def test_deliberate_auto_approve_past_total_max(self, monkeypatch):
+        gp, agent = self._make_pipeline()
+        _shared.state.dualhead_mode = True
+        _shared.state.dualhead_max_rounds = 2
+        _shared.state.dualhead_escalation_rounds = 1
+        # Simulate already used up all rounds
+        gp._deliberation_round = 3  # will be incremented to 4 > total_max=3
+        gp._deliberation_history = [
+            ("plan1", "fix X", False),
+            ("plan2", "fix Y", False),
+            ("plan3", "still issues", False),
+        ]
+
+        conversation = []
+        await gp.deliberate_on_agent_plan(conversation)
+
+        assert gp._deliberation_round == 4
+        assert any("Grok Edit Master Head" in m["content"] for m in conversation)
+
+    @pytest.mark.asyncio
+    async def test_deliberate_escalation_triggers(self, monkeypatch):
+        gp, agent = self._make_pipeline()
+        _shared.state.dualhead_mode = True
+        _shared.state.dualhead_max_rounds = 2
+        _shared.state.dualhead_escalation_rounds = 1
+        gp._deliberation_round = 2  # will be incremented to 3 (> max_normal=2)
+        gp._deliberation_history = [
+            ("plan1", "fix X", False),
+            ("plan2", "fix Y", False),
+        ]
+
+        # Mock the hardcore escalation
+        async def mock_escalate(self_gp):
+            self_gp.agent.plan = [{"step": "Synthesized step A"}, {"step": "Synthesized step B"}]
+            return "1. Synthesized step A\n2. Synthesized step B"
+        monkeypatch.setattr(type(gp), "_escalate_with_hardcore", mock_escalate)
+
+        # Mock Claude review to approve
+        async def mock_review(self_rev, prompt, timeout=120):
+            return "APPROVED"
+        from grokswarm.guardrails import ClaudeReviewer
+        monkeypatch.setattr(ClaudeReviewer, "review", mock_review)
+
+        conversation = []
+        await gp.deliberate_on_agent_plan(conversation)
+
+        assert gp._deliberation_round == 3
+        assert gp._deliberation_escalated is True
+        assert len(gp._deliberation_history) == 3
+        assert gp._deliberation_history[2][2] is True  # approved
+
+    @pytest.mark.asyncio
+    async def test_deliberate_escalation_feedback_auto_approves(self, monkeypatch):
+        """When Claude gives feedback during the final escalation round, Grok gets final say."""
+        gp, agent = self._make_pipeline()
+        _shared.state.dualhead_mode = True
+        _shared.state.dualhead_max_rounds = 2
+        _shared.state.dualhead_escalation_rounds = 1
+        gp._deliberation_round = 2  # will be incremented to 3 = total_max
+        gp._deliberation_history = [
+            ("plan1", "fix X", False),
+            ("plan2", "fix Y", False),
+        ]
+
+        async def mock_escalate(self_gp):
+            return "1. Step A\n2. Step B"
+        monkeypatch.setattr(type(gp), "_escalate_with_hardcore", mock_escalate)
+
+        # Claude rejects even escalated plan
+        async def mock_review(self_rev, prompt, timeout=120):
+            return "I still have concerns about error handling."
+        from grokswarm.guardrails import ClaudeReviewer
+        monkeypatch.setattr(ClaudeReviewer, "review", mock_review)
+
+        conversation = []
+        await gp.deliberate_on_agent_plan(conversation)
+
+        # Should auto-approve since rnd >= total_max and feedback
+        assert any("Grok Edit Master Head" in m["content"] for m in conversation)
+
+    @pytest.mark.asyncio
+    async def test_round_tracking_persists_across_calls(self, monkeypatch):
+        """Multiple calls to deliberate_on_agent_plan increment the round counter."""
+        gp, agent = self._make_pipeline()
+        _shared.state.dualhead_mode = True
+        _shared.state.dualhead_max_rounds = 5
+        _shared.state.dualhead_escalation_rounds = 1
+
+        async def mock_review(self_rev, prompt, timeout=120):
+            return "Please add more tests."
+        from grokswarm.guardrails import ClaudeReviewer
+        monkeypatch.setattr(ClaudeReviewer, "review", mock_review)
+
+        # Round 1
+        conversation = []
+        await gp.deliberate_on_agent_plan(conversation)
+        assert gp._deliberation_round == 1
+        assert agent.phase == "planning"
+
+        # Simulate agent re-planning and triggering deliberation again
+        agent.phase = "executing"
+        agent.plan = [{"step": "Revised step 1"}, {"step": "Revised step 2"}]
+        gp._needs_deliberation = True
+
+        # Round 2
+        await gp.deliberate_on_agent_plan(conversation)
+        assert gp._deliberation_round == 2
+        assert len(gp._deliberation_history) == 2
+
+    def test_collaborative_prompt_softened_instructions(self):
+        """Verify the softened review prompt has collaborative language."""
+        from grokswarm.guardrails import ExternalReviewer
+        reviewer = ExternalReviewer(name="Test", cli_command="test")
+        prompt = reviewer.build_review_prompt("plan", "project", "caps", [])
+        assert "collaborating" in prompt
+        assert "advisory notes" in prompt
+        assert "FAIL" in prompt
+        assert "Minor style" in prompt
