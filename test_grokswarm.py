@@ -2845,6 +2845,33 @@ class TestDualheadDeliberationV2:
         assert any("3 round(s) remaining" in m["content"] for m in conversation)
 
     @pytest.mark.asyncio
+    async def test_deliberate_feedback_grants_bonus_rounds(self, monkeypatch):
+        """Each rejection grants 2 bonus rounds to compensate for deliberation overhead."""
+        gp, agent = self._make_pipeline()
+        _shared.state.dualhead_mode = True
+        _shared.state.dualhead_max_rounds = 3
+        _shared.state.dualhead_escalation_rounds = 1
+
+        async def mock_review(self_rev, prompt, timeout=120):
+            return "You need to add error handling."
+        from grokswarm.guardrails import ClaudeReviewer
+        monkeypatch.setattr(ClaudeReviewer, "review", mock_review)
+
+        assert gp.deliberation_bonus_rounds == 0
+
+        # Round 1: feedback → +2 bonus
+        conversation = []
+        await gp.deliberate_on_agent_plan(conversation)
+        assert gp.deliberation_bonus_rounds == 2
+
+        # Round 2: feedback → +2 more bonus
+        agent.phase = "executing"
+        agent.plan = [{"step": "Revised plan"}]
+        gp._needs_deliberation = True
+        await gp.deliberate_on_agent_plan(conversation)
+        assert gp.deliberation_bonus_rounds == 4
+
+    @pytest.mark.asyncio
     async def test_deliberate_auto_approve_past_total_max(self, monkeypatch):
         gp, agent = self._make_pipeline()
         _shared.state.dualhead_mode = True
